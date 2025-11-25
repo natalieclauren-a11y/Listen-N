@@ -1,10 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
-using System.Threading;
 
 namespace Listen_N
 {
@@ -87,64 +85,56 @@ namespace Listen_N
             {
                 RunScenario(scenario, writer);
             }
+
+            Console.WriteLine($"Adaptive harness CSV written to {Path.GetFullPath(csvPath)}");
         }
 
         private static void RunScenario(Scenario scenario, StreamWriter writer)
         {
-            using var engine = new AdaptiveWindowEngine();
+            using var engine = new AdaptiveWindowEngine(startWorker: false);
             var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
             var stepField = typeof(AdaptiveWindowEngine).GetField("_S", BindingFlags.Instance | BindingFlags.NonPublic);
 
             int estimateIdx = 0;
-            var sw = Stopwatch.StartNew();
-            var quietTimer = Stopwatch.StartNew();
-            object sync = new();
-
             engine.OnEstimate += est =>
             {
                 double tau = tauField?.GetValue(engine) is double t ? t : double.NaN;
                 double step = stepField?.GetValue(engine) is double s ? s : double.NaN;
 
-                lock (sync)
+                writer.WriteLine(string.Join(",", new[]
                 {
-                    writer.WriteLine(string.Join(",", new[]
-                    {
-                        scenario.Name,
-                        estimateIdx.ToString(CultureInfo.InvariantCulture),
-                        est.NowUs.ToString(CultureInfo.InvariantCulture),
-                        est.State,
-                        est.GateUs.ToString(CultureInfo.InvariantCulture),
-                        est.WindowSec.ToString(CultureInfo.InvariantCulture),
-                        step.ToString(CultureInfo.InvariantCulture),
-                        tau.ToString(CultureInfo.InvariantCulture),
-                        est.M1.ToString(CultureInfo.InvariantCulture),
-                        est.M2.ToString(CultureInfo.InvariantCulture),
-                        est.M3.ToString(CultureInfo.InvariantCulture),
-                        est.Y.ToString(CultureInfo.InvariantCulture),
-                        est.SigmaY.ToString(CultureInfo.InvariantCulture),
-                        est.HasSignificance.ToString(CultureInfo.InvariantCulture),
-                        est.IsLowRate.ToString(CultureInfo.InvariantCulture),
-                        est.IsDegraded.ToString(CultureInfo.InvariantCulture),
-                        est.IsStatsBound.ToString(CultureInfo.InvariantCulture),
-                        est.InsufficientStatistics.ToString(CultureInfo.InvariantCulture),
-                        est.ModelMismatch.ToString(CultureInfo.InvariantCulture)
-                    }));
-                    estimateIdx++;
-                    quietTimer.Restart();
-                }
+                    scenario.Name,
+                    estimateIdx.ToString(CultureInfo.InvariantCulture),
+                    est.NowUs.ToString(CultureInfo.InvariantCulture),
+                    est.State,
+                    est.GateUs.ToString(CultureInfo.InvariantCulture),
+                    est.WindowSec.ToString(CultureInfo.InvariantCulture),
+                    step.ToString(CultureInfo.InvariantCulture),
+                    tau.ToString(CultureInfo.InvariantCulture),
+                    est.M1.ToString(CultureInfo.InvariantCulture),
+                    est.M2.ToString(CultureInfo.InvariantCulture),
+                    est.M3.ToString(CultureInfo.InvariantCulture),
+                    est.Y.ToString(CultureInfo.InvariantCulture),
+                    est.SigmaY.ToString(CultureInfo.InvariantCulture),
+                    est.HasSignificance.ToString(CultureInfo.InvariantCulture),
+                    est.IsLowRate.ToString(CultureInfo.InvariantCulture),
+                    est.IsDegraded.ToString(CultureInfo.InvariantCulture),
+                    est.IsStatsBound.ToString(CultureInfo.InvariantCulture),
+                    est.InsufficientStatistics.ToString(CultureInfo.InvariantCulture),
+                    est.ModelMismatch.ToString(CultureInfo.InvariantCulture)
+                }));
+                estimateIdx++;
             };
 
+            long lastTs = 0;
             foreach (long t in scenario.Timestamps)
             {
+                lastTs = t;
                 engine.OnDetection(new Detection(t));
+                engine.ForceEstimate(t);
             }
 
-            // allow the worker to finish emitting estimates
-            while (quietTimer.Elapsed < TimeSpan.FromMilliseconds(500) && sw.Elapsed < TimeSpan.FromSeconds(10))
-            {
-                Thread.Sleep(50);
-            }
-
+            engine.ForceEstimate(lastTs);
             writer.Flush();
         }
     }

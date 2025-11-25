@@ -87,7 +87,8 @@ namespace Listen_N
         // ——— runtime state ———
         private readonly BaseBinAccumulator _acc; // accumulator of counts
         private readonly Channel<Detection> _inbound; // inbound channel
-        private readonly Thread _worker;             // worker thread
+        private readonly Thread? _worker;             // worker thread
+        private readonly bool _startWorker;
         private volatile bool _running = true;       // loop control flag
 
         private readonly struct MomentCovariance
@@ -126,6 +127,7 @@ namespace Listen_N
         private FSM _pendingFsm = FSM.Warmup;
         private int _fsmConfirmations = 0;
         private long _holdQuietUntilUs = 0;
+        private long _nextStepUs = 0;
 
         // Page–Hinkley change-point detection variables
         private double _cpMean, _cpCum;
@@ -140,7 +142,8 @@ namespace Listen_N
             int[]? gateLadderUs = null,
             int zMin = 3,
             double epsY = 0.10,
-            double epsM1 = 0.02)
+            double epsM1 = 0.02,
+            bool startWorker = true)
         {
             _deltaUs = baseDeltaUs;
             _tgUs = gateLadderUs ?? new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
@@ -148,10 +151,11 @@ namespace Listen_N
             _wMin = windowMinSec;
             _wMax = windowMaxSec;
             _W = windowStartSec;
-            _beta = 0.25;
+            _beta = 0.1;
             _zMin = zMin;
             _epsY = epsY;
             _epsM1 = epsM1;
+            _startWorker = startWorker;
 
             // initialize accumulator and channel infrastructure
             _acc = new BaseBinAccumulator(_deltaUs, _wMax);
@@ -160,14 +164,17 @@ namespace Listen_N
                 SingleWriter = false,
                 SingleReader = true
             });
-            _worker = new Thread(Worker) { IsBackground = true, Name = "AdaptiveWindowEngine" };
-            _worker.Start();
+            if (_startWorker)
+            {
+                _worker = new Thread(Worker) { IsBackground = true, Name = "AdaptiveWindowEngine" };
+                _worker.Start();
+            }
         }
 
         public void Dispose()
         {
             _running = false;
-            _worker.Join();
+            _worker?.Join();
         }
 
         // Push a new detection into channel (non-blocking)
@@ -179,23 +186,45 @@ namespace Listen_N
         // ——— worker loop ———
         private void Worker()
         {
-            long nextStepUs = 0;
             var r = _inbound.Reader;
             while (_running)
             {
-                // drain all pending detections
-                while (r.TryRead(out var d)) _acc.Add(d.TicksUs);
+                DrainInbound(r);
+                InitializeNextStep();
 
-                if (nextStepUs == 0) nextStepUs = _acc.LeftEdgeUs + (long)(_W * 1e6);
                 long nowUs = _acc.LeftEdgeUs + (long)(_W * 1e6);
-
-                if (nowUs >= nextStepUs)
+                while (_nextStepUs != 0 && nowUs >= _nextStepUs)
                 {
-                    Step(nowUs);
-                    nextStepUs = nowUs + (long)(StepSizeSec() * 1e6);
+                    Step(_nextStepUs);
+                    _nextStepUs = _nextStepUs + (long)(StepSizeSec() * 1e6);
                 }
-
                 Thread.SpinWait(256);
+            }
+        }
+
+        private void InitializeNextStep()
+        {
+            if (_nextStepUs != 0) return;
+            if (_acc.LeftEdgeUs == 0) return;
+            _nextStepUs = _acc.LeftEdgeUs + (long)(_W * 1e6);
+        }
+
+        private void DrainInbound(ChannelReader<Detection>? reader = null)
+        {
+            var r = reader ?? _inbound.Reader;
+            while (r.TryRead(out var d)) _acc.Add(d.TicksUs);
+        }
+
+        public void ForceEstimate(long nowUs)
+        {
+            DrainInbound();
+            InitializeNextStep();
+            if (_nextStepUs == 0) return;
+
+            while (nowUs >= _nextStepUs)
+            {
+                Step(_nextStepUs);
+                _nextStepUs = _nextStepUs + (long)(StepSizeSec() * 1e6);
             }
         }
 
@@ -434,7 +463,8 @@ namespace Listen_N
             {
                 case FSM.Warmup:
                     _beta = BetaForState(_fsm);
-                    if (hasSignificance && !degraded) RequestFsmState(FSM.Track, nowUs);
+                    if ((nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6)) RequestFsmState(FSM.Track, nowUs);
+                    else if (hasSignificance && !degraded) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Track:
