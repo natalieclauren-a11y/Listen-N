@@ -1420,12 +1420,15 @@ namespace Vf61Gui
             bytesTransferred = 0;
             string path = Path.Combine(new string[] { netSaveFilepath, IpAddress.Replace('.', '_'), netSaveFileName + ".lmx" });
             currentNetLmxPath = path;
-            lmxHeaderWritten = false;
-            lmxFileheader = Encoding.ASCII.GetString(bufferRead, 0, bytesRead);
-            int length = lmxFileheader.IndexOf("BinaryDataFollows");
-            if (length > 0)
+            if (string.IsNullOrEmpty(lmxFileheader))
             {
-                lmxFileheader = lmxFileheader.Substring(0, length);
+                lmxHeaderWritten = false;
+                lmxFileheader = Encoding.ASCII.GetString(bufferRead, 0, bytesRead);
+                int length = lmxFileheader.IndexOf("BinaryDataFollows");
+                if (length > 0)
+                {
+                    lmxFileheader = lmxFileheader.Substring(0, length);
+                }
             }
             try
             {
