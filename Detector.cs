@@ -229,6 +229,8 @@ namespace Vf61Gui
         public string mother = @"Mother";   // The first command the MC-15 expects is "Mother". If "Mother" is not the first command then the MC-15 will not connect.
         public string netSaveFilepath = @"C:\Data\";
         public string netSaveFileName = ""; // When NetSaveFile is sent, save the requested filename here.
+        public string currentNetLmxPath = string.Empty;          // Full path to the active streamed LMX file
+        public bool lmxHeaderWritten = false;                    // Tracks whether the LMX header has been persisted
         public string lastCommand = "";     // The last command sent to the MC-15.
         public string lastReply = "";       // The last reply sent from the MC-15.
 
@@ -1111,6 +1113,67 @@ namespace Vf61Gui
 
             }
         }
+
+        private void SetLmxHeader(string headerText)
+        {
+            if (string.IsNullOrEmpty(headerText))
+            {
+                return;
+            }
+
+            lmxFileheader = headerText;
+            lmxHeaderWritten = false;
+            TryWriteLmxHeaderToFile();
+        }
+
+        private void TryWriteLmxHeaderToFile()
+        {
+            if (binaryWriter == null || string.IsNullOrEmpty(lmxFileheader) || lmxHeaderWritten)
+            {
+                return;
+            }
+
+            byte[] headerBytes = Encoding.ASCII.GetBytes(lmxFileheader);
+            FileStream fileStream = binaryWriter.BaseStream as FileStream;
+            if (fileStream == null)
+            {
+                return;
+            }
+
+            if (fileStream.Length == 0)
+            {
+                binaryWriter.Write(headerBytes, 0, headerBytes.Length);
+            }
+            else
+            {
+                string tempPath = Path.GetTempFileName();
+
+                // Flush existing data so we can rebuild the file with the header prefix
+                binaryWriter.Flush();
+                fileStream.Position = 0;
+
+                using (FileStream tempStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    tempStream.Write(headerBytes, 0, headerBytes.Length);
+                    fileStream.CopyTo(tempStream);
+                }
+
+                string destinationPath = string.IsNullOrEmpty(currentNetLmxPath) && fileStream.Name != null
+                    ? fileStream.Name
+                    : currentNetLmxPath;
+
+                binaryWriter.Close();
+                binaryWriter.Dispose();
+
+                File.Copy(tempPath, destinationPath, true);
+                File.Delete(tempPath);
+
+                binaryWriter = new BinaryWriter(File.Open(destinationPath, FileMode.Open, FileAccess.Write, FileShare.Read));
+                binaryWriter.BaseStream.Position = binaryWriter.BaseStream.Length;
+            }
+
+            lmxHeaderWritten = true;
+        }
         /// <summary>
         /// Process the incoming byte[] as a text response from the TCP/IP socket or the serial port.
         /// </summary>
@@ -1247,21 +1310,23 @@ namespace Vf61Gui
                             ClearState(InstrumentState.COPYING_NET);
                             return;
                         }
+
+                        SetLmxHeader(Encoding.ASCII.GetString(bufferRead, 0, bytesRead));
                     }
                     else // Case 2) Local File Storage
                     {
                         // binaryWriter != null
                         // The Fileheader comes after the data is streamed.
-                        // It just so happens that 
+                        SetLmxHeader(Encoding.ASCII.GetString(bufferRead, index, bytesRead));
                     }
                 }
                 else if (index > 0)
                 {
                     EnqueueMessage("<index > 0>", WhichMessage.MessagesReceived);
-                    // 
+                    //
 
                     // This is the header from the lmxFile
-                    lmxFileheader = Encoding.ASCII.GetString(bufferRead, index, bytesRead);
+                    SetLmxHeader(Encoding.ASCII.GetString(bufferRead, index, bytesRead));
                     // write the last message to the file.
                     // This might be a partial data + last message
                     // Before we started writing data to the file we set aside an area at the TOP
@@ -1309,6 +1374,7 @@ namespace Vf61Gui
             {
                 OpenNetLmxFile(bufferRead, bytesRead);
             }
+            TryWriteLmxHeaderToFile();
             binaryWriter.Write(bufferRead, 0, bytesRead);
             bytesTransferred += (uint)bytesRead;
 
@@ -1348,11 +1414,13 @@ namespace Vf61Gui
             // There is no binaryWriter open.
             // This means that NetSaveFile was sent and the MC-15 is returning a file 
             //  to be saved.
-            // If you are streaming data from the MC-15 then binaryWriter will be opened when 
+            // If you are streaming data from the MC-15 then binaryWriter will be opened when
             //  the command Go is sent and storageLocation == InstrumentStorageLocation.NET
             SetState(InstrumentState.COPYING_NET);
             bytesTransferred = 0;
             string path = Path.Combine(new string[] { netSaveFilepath, IpAddress.Replace('.', '_'), netSaveFileName + ".lmx" });
+            currentNetLmxPath = path;
+            lmxHeaderWritten = false;
             lmxFileheader = Encoding.ASCII.GetString(bufferRead, 0, bytesRead);
             int length = lmxFileheader.IndexOf("BinaryDataFollows");
             if (length > 0)
@@ -1363,6 +1431,7 @@ namespace Vf61Gui
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 binaryWriter = new BinaryWriter(File.Open(path, FileMode.Create));
+                TryWriteLmxHeaderToFile();
                 //resetEventFileTransfer.Reset();
             }
             catch (Exception ex)
@@ -5082,6 +5151,9 @@ namespace Vf61Gui
                     return;
                 }
                 netSaveFileName = replies[1];
+                currentNetLmxPath = string.Empty;
+                lmxFileheader = "";
+                lmxHeaderWritten = false;
             }
             catch (Exception ex)
             {

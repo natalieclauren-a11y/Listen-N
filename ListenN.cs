@@ -1370,6 +1370,13 @@ namespace Listen_N
                     detector.SetState(InstrumentState.ACTIVE);
                 }
 
+                // When saving to the computer we need to request a new streamed file name
+                // before sending Go so the instrument knows to push list-mode data over TCP.
+                if (storageMode == "COMPUTER")
+                {
+                    SendNetSaveFileCommand();
+                }
+
                 // Small delay to give time for commands to settle
                 await Task.Delay(100);
 
@@ -1973,12 +1980,8 @@ namespace Listen_N
             lastFileStartTime = DateTime.Now;
 
             // Stop current file and start new one
-            foreach (var detector in detectors.Where(d => d.CheckState(InstrumentState.ONLINE)))
-            {
-                // The detector should close the current file when receiving a new NetSaveFile command
-                SendNetSaveFileCommand();
-
-            }
+            // The detector should close the current file when receiving a new NetSaveFile command
+            SendNetSaveFileCommand();
 
             AppendMessage(null, new DebuggingMessage($"File rollover: Starting file #{fileIndex}"), "auto > ");
         }
