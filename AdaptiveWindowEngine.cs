@@ -43,11 +43,18 @@ namespace Listen_N
             public int GateUs { get; init; }       // gate width in µs
             public double WindowSec { get; init; } // current analysis window size (s)
             public double M1 { get; init; }        // first factorial moment
+            public double M2 { get; init; }        // second factorial moment
+            public double M3 { get; init; }        // third factorial moment
             public double Y { get; init; }         // Feynman-Y statistic
             public double SigmaY { get; init; }    // uncertainty of Y
             public double ZY { get; init; }        // Z-score of Y (Y / σY)
             public string State { get; init; } = "Track"; // finite state machine state
             public bool HasSignificance { get; init; }     // significance flag
+            public bool IsLowRate { get; init; }
+            public bool IsDegraded { get; init; }
+            public bool IsStatsBound { get; init; }
+            public bool InsufficientStatistics { get; init; }
+            public bool ModelMismatch { get; init; }
         }
 
         public event Action<Estimate>? OnEstimate; // callback for new estimates
@@ -108,10 +115,22 @@ namespace Listen_N
         private int _tgIdx;      // current gate index in ladder
         private double _W;       // current window size (s)
         private double _beta;    // step fraction for sliding window
+        private double _S;       // step size (s)
+
+        private double _tauHat = double.NaN;
+        private double[] _corrResiduals = Array.Empty<double>();
+        private bool _statsBound;
+        private bool _insufficientStatistics;
+        private bool _modelMismatch;
+
+        private FSM _pendingFsm = FSM.Warmup;
+        private int _fsmConfirmations = 0;
+        private long _holdQuietUntilUs = 0;
 
         // Page–Hinkley change-point detection variables
         private double _cpMean, _cpCum;
         private readonly double _cpDelta = 5e-3, _cpLambda = 50.0;
+        private double _cpZyMean, _cpZyCum;
 
         public AdaptiveWindowEngine(
             int baseDeltaUs = 500,
@@ -183,8 +202,9 @@ namespace Listen_N
         // Compute adaptive step size for sliding window
         private double StepSizeSec()
         {
-            double s = Math.Max(_deltaUs / 1e6, _beta * _W);
-            return Math.Clamp(s, 1e-3, _wMax);
+            _S = Math.Max(_deltaUs / 1e6, _beta * _W);
+            _S = Math.Clamp(_S, 1e-3, _wMax);
+            return _S;
         }
 
         // Perform one analysis step
@@ -193,11 +213,13 @@ namespace Listen_N
             // Slide accumulator to discard old bins
             _acc.SlideLeftTo(nowUs - (long)(_wMax * 1e6));
 
-            int bestIdx = _tgIdx;
+            _statsBound = false;
+            _modelMismatch = false;
+            _insufficientStatistics = false;
+
             double selM1 = 0, selM2 = 0, selM3 = 0;
             int selN = 0;
             double selY = 0, selSigY = 0;
-            double selRelY = double.PositiveInfinity, selRelM1 = double.PositiveInfinity;
 
             int significantIdx = -1;
             int plateauIdx = -1;
@@ -207,26 +229,38 @@ namespace Listen_N
 
             // covariance entries for selected gate
             double selV11 = 0, selV22 = 0, selV12 = 0;
+            bool illConditioned = false;
+            bool anyValidY = false;
+            bool allNonPositiveY = true;
 
             // loop across ladder of gate widths
             for (int k = 0; k < _tgUs.Length; k++)
             {
                 _acc.ComputeMoments(_W, _tgUs[k],
                     out var m1, out var m2, out var m3, out var N,
-                    out var cov);
+                    out var rawCov);
+
+                bool covOk = RegularizeCov(rawCov, out var cov);
+                illConditioned |= !covOk;
 
                 // compute Feynman-Y and a rough uncertainty estimate using delta method
                 var y = MomentsMath.Y(m1, m2);
                 Yk[k] = y;
 
                 double sigY = double.PositiveInfinity;
-                if (N > 1)
+                if (N > 1 && covOk)
                 {
                     double varY = MomentsMath.VarY(m1, m2, cov.V11, cov.V22, cov.V12);
                     sigY = double.IsFinite(varY) && varY > 0 ? Math.Sqrt(varY) : double.PositiveInfinity;
                 }
 
                 sigYk[k] = sigY;
+                bool validGate = sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y);
+                if (validGate)
+                {
+                    anyValidY = true;
+                    allNonPositiveY &= y <= 0;
+                }
 
                 if (k == _tgIdx)
                 {
@@ -240,30 +274,35 @@ namespace Listen_N
                     selV11 = cov.V11;
                     selV22 = cov.V22;
                     selV12 = cov.V12;
-                    selRelY = (sigY > 0 && double.IsFinite(sigY) && y > 0) ? sigY / y : double.PositiveInfinity;
-                    selRelM1 = cov.V11 > 0 ? Math.Sqrt(cov.V11) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
                 }
 
                 bool hasSig = sigY > 0 && double.IsFinite(sigY) && y > 0 && (y / sigY) >= _zMin;
                 if (hasSig && significantIdx < 0) significantIdx = k;
 
-                if (hasSig && k > 0 && significantIdx >= 0 && plateauIdx < 0)
+                if (hasSig && k > 0 && significantIdx >= 0 && k >= significantIdx)
                 {
                     double dlog = Math.Log((double)_tgUs[k] / _tgUs[k - 1]);
                     if (dlog > 0)
                     {
                         double slope = Math.Abs((Yk[k] - Yk[k - 1]) / dlog);
                         double eta = _etaFrac * Math.Abs(Yk[k]);
-                        if (slope <= eta) plateauIdx = k;
+                        if (slope <= eta)
+                        {
+                            plateauIdx = k;
+                        }
                     }
                 }
             }
+
+            // correlation-time fit across ladder
+            _tauHat = FitCorrelationTime(Yk, sigYk, out _corrResiduals);
+            _modelMismatch = _corrResiduals.Length > 0 && Rms(_corrResiduals) > (_epsY * 2.0);
 
             int desiredIdx = _tgIdx;
             if (significantIdx < 0)
             {
                 desiredIdx = 0;
-                _fsm = FSM.LowRate;
+                RequestFsmState(FSM.LowRate, nowUs);
             }
             else
             {
@@ -272,6 +311,16 @@ namespace Listen_N
 
             UpdateGateSelection(desiredIdx);
 
+            bool hasAnySignificance = significantIdx >= 0;
+            bool hasSignificance = selSigY > 0 && double.IsFinite(selSigY) && selY > 0 && (selY / selSigY) >= _zMin;
+            bool singlesChange = RateChange(selM1);
+            bool correlationChange = RateChangeZy(selSigY > 0 && double.IsFinite(selSigY) ? selY / selSigY : 0);
+            bool degraded = illConditioned || (allNonPositiveY && anyValidY);
+
+            _insufficientStatistics = significantIdx < 0 || selSigY <= 0 || double.IsInfinity(selSigY);
+
+            AdaptState(nowUs, selY, selSigY, selM1, selV11, hasAnySignificance, singlesChange, correlationChange, degraded);
+
             // package results into Estimate
             var est = new Estimate
             {
@@ -279,11 +328,18 @@ namespace Listen_N
                 GateUs = _tgUs[_tgIdx],
                 WindowSec = _W,
                 M1 = selM1,
+                M2 = selM2,
+                M3 = selM3,
                 Y = selY,
                 SigmaY = selSigY,
                 ZY = selSigY > 0 && double.IsFinite(selSigY) ? selY / selSigY : 0,
                 State = _fsm.ToString(),
-                HasSignificance = selSigY > 0 && double.IsFinite(selSigY)
+                HasSignificance = hasSignificance,
+                IsLowRate = _fsm == FSM.LowRate,
+                IsDegraded = _fsm == FSM.Degraded,
+                IsStatsBound = _statsBound,
+                InsufficientStatistics = _insufficientStatistics,
+                ModelMismatch = _modelMismatch
             };
 
             // log estimate
@@ -308,7 +364,6 @@ namespace Listen_N
             string json = System.Text.Json.JsonSerializer.Serialize(log, options);
             System.IO.File.AppendAllText("adaptive.log", json + Environment.NewLine);
 
-            AdaptState(selY, selSigY, selM1, selV11);
             OnEstimate?.Invoke(est);
         }
 
@@ -349,8 +404,9 @@ namespace Listen_N
             }
         }
 
-        // Adapt window size based on uncertainty
-        private void AdaptWindow(double Y, double sigY, double m1, double varM1)
+        private double TauLowerBound() => (double.IsFinite(_tauHat) && _tauHat > 0) ? Math.Max(_wMin, 3.0 * _tauHat) : _wMin;
+
+        private void AdaptWindow(double Y, double sigY, double m1, double varM1, bool honorTauFloor, double rDown = 0.5, double rUp = 2.0)
         {
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
@@ -358,83 +414,140 @@ namespace Listen_N
             double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
             if (double.IsFinite(scale) && scale > 0)
             {
-                double rDown = 0.5, rUp = 2.0;
                 double req = Math.Clamp(_W * scale, _W * rDown, _W * rUp);
-                _W = Math.Clamp(req, _wMin, _wMax);
+                double lower = honorTauFloor ? TauLowerBound() : _wMin;
+                _W = Math.Clamp(req, lower, _wMax);
+                _statsBound = _W >= _wMax && scale > 1.0;
             }
 
-            _beta = (relY < 0.8 && relM1 < 0.8) ? 0.5 : 0.25;
+            _beta = BetaForState(_fsm);
         }
 
-        private void AdaptState(double Y, double sigY, double m1, double varM1)
+        private void AdaptState(long nowUs, double Y, double sigY, double m1, double varM1, bool hasSignificance, bool singlesChange, bool correlationChange, bool degraded)
         {
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
             double relMax = Math.Max(relY, relM1);
-
-            bool changeDetected = RateChange(m1);
-            bool degraded = double.IsNaN(sigY) || double.IsInfinity(sigY);
+            bool needHold = singlesChange || correlationChange;
 
             switch (_fsm)
             {
                 case FSM.Warmup:
-                    if (!degraded && double.IsFinite(relMax)) _fsm = FSM.Track;
+                    _beta = BetaForState(_fsm);
+                    if (hasSignificance && !degraded) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Track:
-                    if (_fsm == FSM.LowRate) break;
+                    _beta = BetaForState(_fsm);
                     if (degraded)
                     {
-                        _fsm = FSM.Degraded;
+                        RequestFsmState(FSM.Degraded, nowUs);
                         break;
                     }
-                    if (changeDetected)
+                    if (needHold)
                     {
-                        _fsm = FSM.Hold;
-                        _beta = 0.1;
+                        RequestFsmState(FSM.Hold, nowUs);
                         break;
                     }
                     if (relMax > 1.0 && _W < _wMax)
                     {
-                        _fsm = FSM.Expand;
+                        RequestFsmState(FSM.Expand, nowUs);
                     }
-                    else if (relMax < 0.5 && _W > _wMin)
+                    else if (relMax < 0.5 && _W > TauLowerBound())
                     {
-                        _fsm = FSM.Contract;
+                        RequestFsmState(FSM.Contract, nowUs);
+                    }
+                    else
+                    {
+                        AdaptWindow(Y, sigY, m1, varM1, false);
                     }
                     break;
 
                 case FSM.Expand:
-                    AdaptWindow(Y, sigY, m1, varM1);
-                    if (relMax <= 1.0 || _W >= _wMax) _fsm = FSM.Track;
+                    _beta = BetaForState(_fsm);
+                    AdaptWindow(Y, sigY, m1, varM1, false, 0.8, 2.0);
+                    if (relMax <= 1.0 || _W >= _wMax) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Contract:
-                    AdaptWindow(Y, sigY, m1, varM1);
-                    if (relMax >= 0.8 || _W <= _wMin) _fsm = FSM.Track;
+                    _beta = BetaForState(_fsm);
+                    AdaptWindow(Y, sigY, m1, varM1, true, 0.5, 1.2);
+                    if (relMax >= 0.8 || _W <= TauLowerBound()) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Hold:
                     _beta = 0.1;
-                    if (!changeDetected) _fsm = FSM.Track;
+                    _W = Math.Max(_W, TauLowerBound());
+                    if (!needHold && nowUs >= _holdQuietUntilUs) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.LowRate:
+                    _beta = 0.1;
                     _tgIdx = 0;
                     _W = Math.Min(_W * 1.2, _wMax);
-                    if (Y > 0 && sigY > 0 && (Y / sigY) >= _zMin) _fsm = FSM.Track;
+                    if (hasSignificance) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Degraded:
+                    _beta = 0.1;
                     _tgIdx = 0;
-                    _W = Math.Min(_W * 1.5, _wMax);
-                    if (!degraded && sigY > 0 && double.IsFinite(sigY)) _fsm = FSM.Track;
+                    _W = Math.Min(_W * 1.1, _wMax);
+                    if (!degraded && hasSignificance) RequestFsmState(FSM.Track, nowUs);
                     break;
             }
+        }
 
-            if (_fsm == FSM.Track)
+        private void RequestFsmState(FSM target, long nowUs)
+        {
+            if (target == _fsm)
             {
-                AdaptWindow(Y, sigY, m1, varM1);
+                _pendingFsm = _fsm;
+                _fsmConfirmations = 0;
+                return;
+            }
+
+            if (_pendingFsm != target)
+            {
+                _pendingFsm = target;
+                _fsmConfirmations = 1;
+                return;
+            }
+
+            _fsmConfirmations++;
+            if (_fsmConfirmations >= 2)
+            {
+                EnterState(target, nowUs);
+            }
+        }
+
+        private void EnterState(FSM target, long nowUs)
+        {
+            _fsm = target;
+            _pendingFsm = target;
+            _fsmConfirmations = 0;
+            switch (target)
+            {
+                case FSM.Hold:
+                    _W = Math.Max(_W, TauLowerBound());
+                    _beta = 0.1;
+                    _S = _beta * _W;
+                    double horizon = Math.Max(5 * _S, 4 * TauLowerBound());
+                    _holdQuietUntilUs = nowUs + (long)(horizon * 1e6);
+                    break;
+                case FSM.LowRate:
+                    _tgIdx = 0;
+                    _W = Math.Max(_W, _wMin);
+                    _beta = 0.1;
+                    break;
+                case FSM.Degraded:
+                    _tgIdx = 0;
+                    _W = Math.Max(_W, _wMin);
+                    _beta = 0.1;
+                    break;
+                default:
+                    _holdQuietUntilUs = 0;
+                    _beta = BetaForState(target);
+                    break;
             }
         }
 
@@ -445,6 +558,13 @@ namespace Listen_N
         }
 
         private static double Sq(double x) => x * x;
+        private static double Rms(double[] residuals)
+        {
+            if (residuals.Length == 0) return 0;
+            double sum = 0;
+            foreach (var r in residuals) sum += r * r;
+            return Math.Sqrt(sum / residuals.Length);
+        }
 
         // Page–Hinkley style change detection
         private bool RateChange(double x)
@@ -454,6 +574,102 @@ namespace Listen_N
             _cpCum += x - _cpMean - _cpDelta;
             if (_cpCum < 0) _cpCum = 0;
             return _cpCum > _cpLambda;
+        }
+
+        private bool RateChangeZy(double zy)
+        {
+            if (_cpZyMean == 0) _cpZyMean = zy;
+            _cpZyMean = 0.99 * _cpZyMean + 0.01 * zy;
+            _cpZyCum += zy - _cpZyMean - _cpDelta;
+            if (_cpZyCum < 0) _cpZyCum = 0;
+            return _cpZyCum > _cpLambda;
+        }
+
+        private double BetaForState(FSM s) => s == FSM.Track ? 0.5 : 0.1;
+
+        private bool RegularizeCov(in MomentCovariance cov, out MomentCovariance reg)
+        {
+            double maxDiag = Math.Max(cov.V11, Math.Max(cov.V22, cov.V33));
+            if (!double.IsFinite(maxDiag) || maxDiag <= 0)
+            {
+                reg = new MomentCovariance();
+                return false;
+            }
+
+            double lambda = 1e-12 * Math.Max(1.0, maxDiag);
+            double v11 = cov.V11 + lambda;
+            double v22 = cov.V22 + lambda;
+            double v33 = cov.V33 + lambda;
+            reg = new MomentCovariance(v11, v22, v33, cov.V12, cov.V13, cov.V23);
+            bool ok = v11 > 0 && v22 > 0 && v33 > 0 && double.IsFinite(cov.V12) && double.IsFinite(cov.V13) && double.IsFinite(cov.V23);
+            return ok;
+        }
+
+        private double FitCorrelationTime(double[] Y, double[] sigY, out double[] residuals)
+        {
+            int n = Math.Min(Y.Length, sigY.Length);
+            double minT = double.MaxValue, maxT = 0;
+            double wSum = 0, ySum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (sigY[i] > 0 && double.IsFinite(sigY[i]) && double.IsFinite(Y[i]))
+                {
+                    double w = 1.0 / (sigY[i] * sigY[i]);
+                    wSum += w;
+                    ySum += w * Y[i];
+                    double t = _tgUs[i] / 1e6;
+                    minT = Math.Min(minT, t);
+                    maxT = Math.Max(maxT, t);
+                }
+            }
+
+            if (wSum <= 0 || !double.IsFinite(minT) || minT <= 0)
+            {
+                residuals = Array.Empty<double>();
+                return double.NaN;
+            }
+
+            double yInf = ySum / wSum;
+            double bestTau = double.NaN;
+            double bestErr = double.PositiveInfinity;
+            double tMin = minT * 0.25;
+            double tMax = maxT * 10.0;
+
+            for (int s = 0; s < 40; s++)
+            {
+                double logTau = Math.Log(tMin) + (Math.Log(tMax / tMin) * s) / 39.0;
+                double tau = Math.Exp(logTau);
+                double err = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    if (sigY[i] <= 0 || !double.IsFinite(sigY[i]) || !double.IsFinite(Y[i])) continue;
+                    double w = 1.0 / (sigY[i] * sigY[i]);
+                    double t = _tgUs[i] / 1e6;
+                    double model = yInf * (1.0 - Math.Exp(-t / tau));
+                    double diff = Y[i] - model;
+                    err += w * diff * diff;
+                }
+                if (err < bestErr)
+                {
+                    bestErr = err;
+                    bestTau = tau;
+                }
+            }
+
+            var resArr = new System.Collections.Generic.List<double>(n);
+            if (double.IsFinite(bestTau))
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    if (sigY[i] <= 0 || !double.IsFinite(sigY[i]) || !double.IsFinite(Y[i])) continue;
+                    double t = _tgUs[i] / 1e6;
+                    double model = yInf * (1.0 - Math.Exp(-t / bestTau));
+                    resArr.Add(Y[i] - model);
+                }
+            }
+
+            residuals = resArr.ToArray();
+            return bestTau;
         }
 
         // Accumulator for counts in fixed bins
