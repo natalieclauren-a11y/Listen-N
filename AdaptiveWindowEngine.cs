@@ -83,9 +83,27 @@ namespace Listen_N
         private readonly Thread _worker;             // worker thread
         private volatile bool _running = true;       // loop control flag
 
+        private readonly struct MomentCovariance
+        {
+            public readonly double V11; // Var(m1_hat)
+            public readonly double V22; // Var(m2_hat)
+            public readonly double V33; // Var(m3_hat)
+            public readonly double V12; // Cov(m1_hat, m2_hat)
+            public readonly double V13; // Cov(m1_hat, m3_hat)
+            public readonly double V23; // Cov(m2_hat, m3_hat)
+
+            public MomentCovariance(double v11, double v22, double v33, double v12, double v13, double v23)
+            {
+                V11 = v11; V22 = v22; V33 = v33; V12 = v12; V13 = v13; V23 = v23;
+            }
+        }
+
         // Finite State Machine states for adaptation
-        private enum FSM { Warmup, Track, Hold, Degraded }
+        private enum FSM { Warmup, Track, Expand, Contract, Hold, LowRate, Degraded }
         private FSM _fsm = FSM.Warmup;
+
+        private int _pendingTgIdx = -1;
+        private int _tgConfirmations = 0;
 
         private int _tgIdx;      // current gate index in ladder
         private double _W;       // current window size (s)
@@ -179,15 +197,23 @@ namespace Listen_N
             double selM1 = 0, selM2 = 0, selM3 = 0;
             int selN = 0;
             double selY = 0, selSigY = 0;
+            double selRelY = double.PositiveInfinity, selRelM1 = double.PositiveInfinity;
+
+            int significantIdx = -1;
+            int plateauIdx = -1;
 
             double[] Yk = new double[_tgUs.Length];
             double[] sigYk = new double[_tgUs.Length];
+
+            // covariance entries for selected gate
+            double selV11 = 0, selV22 = 0, selV12 = 0;
 
             // loop across ladder of gate widths
             for (int k = 0; k < _tgUs.Length; k++)
             {
                 _acc.ComputeMoments(_W, _tgUs[k],
-                    out var m1, out var m2, out var m3, out var N);
+                    out var m1, out var m2, out var m3, out var N,
+                    out var cov);
 
                 // compute Feynman-Y and a rough uncertainty estimate using delta method
                 var y = MomentsMath.Y(m1, m2);
@@ -196,13 +222,7 @@ namespace Listen_N
                 double sigY = double.PositiveInfinity;
                 if (N > 1)
                 {
-                    // sample variance of m1 derived from gate counts
-                    double varM1 = Math.Max(0.0, (m2 + m1 - m1 * m1) / Math.Max(1, N - 1));
-
-                    // rough variance of the second factorial moment using available moments
-                    double varM2 = Math.Max(0.0, (m3 + 4 * m2 + 2 * m1 - m2 * m2) / Math.Max(1, N - 1));
-
-                    double varY = MomentsMath.VarY(m1, m2, varM1, varM2, 0);
+                    double varY = MomentsMath.VarY(m1, m2, cov.V11, cov.V22, cov.V12);
                     sigY = double.IsFinite(varY) && varY > 0 ? Math.Sqrt(varY) : double.PositiveInfinity;
                 }
 
@@ -217,8 +237,40 @@ namespace Listen_N
                     selN = N;
                     selY = y;
                     selSigY = sigY;
+                    selV11 = cov.V11;
+                    selV22 = cov.V22;
+                    selV12 = cov.V12;
+                    selRelY = (sigY > 0 && double.IsFinite(sigY) && y > 0) ? sigY / y : double.PositiveInfinity;
+                    selRelM1 = cov.V11 > 0 ? Math.Sqrt(cov.V11) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
+                }
+
+                bool hasSig = sigY > 0 && double.IsFinite(sigY) && y > 0 && (y / sigY) >= _zMin;
+                if (hasSig && significantIdx < 0) significantIdx = k;
+
+                if (hasSig && k > 0 && significantIdx >= 0 && plateauIdx < 0)
+                {
+                    double dlog = Math.Log((double)_tgUs[k] / _tgUs[k - 1]);
+                    if (dlog > 0)
+                    {
+                        double slope = Math.Abs((Yk[k] - Yk[k - 1]) / dlog);
+                        double eta = _etaFrac * Math.Abs(Yk[k]);
+                        if (slope <= eta) plateauIdx = k;
+                    }
                 }
             }
+
+            int desiredIdx = _tgIdx;
+            if (significantIdx < 0)
+            {
+                desiredIdx = 0;
+                _fsm = FSM.LowRate;
+            }
+            else
+            {
+                desiredIdx = plateauIdx >= significantIdx && plateauIdx >= 0 ? plateauIdx : significantIdx;
+            }
+
+            UpdateGateSelection(desiredIdx);
 
             // package results into Estimate
             var est = new Estimate
@@ -256,6 +308,7 @@ namespace Listen_N
             string json = System.Text.Json.JsonSerializer.Serialize(log, options);
             System.IO.File.AppendAllText("adaptive.log", json + Environment.NewLine);
 
+            AdaptState(selY, selSigY, selM1, selV11);
             OnEstimate?.Invoke(est);
         }
 
@@ -271,20 +324,118 @@ namespace Listen_N
             set => _epsM1 = Math.Max(1e-6, value);
         }
 
+        private void UpdateGateSelection(int desiredIdx)
+        {
+            if (desiredIdx == _tgIdx)
+            {
+                _pendingTgIdx = -1;
+                _tgConfirmations = 0;
+                return;
+            }
+
+            if (_pendingTgIdx != desiredIdx)
+            {
+                _pendingTgIdx = desiredIdx;
+                _tgConfirmations = 1;
+                return;
+            }
+
+            _tgConfirmations++;
+            if (_tgConfirmations >= 2)
+            {
+                _tgIdx = Math.Clamp(desiredIdx, 0, _tgUs.Length - 1);
+                _pendingTgIdx = -1;
+                _tgConfirmations = 0;
+            }
+        }
+
         // Adapt window size based on uncertainty
-        private void AdaptWindow(double Y, double sigY, double m1)
+        private void AdaptWindow(double Y, double sigY, double m1, double varM1)
         {
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
-            double relM1 = (m1 > 0) ? 1.0 / Math.Sqrt(Math.Max(1.0, m1)) : double.PositiveInfinity;
+            double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
 
-            double f = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
-            if (double.IsFinite(f) && f > 0)
+            double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
+            if (double.IsFinite(scale) && scale > 0)
             {
                 double rDown = 0.5, rUp = 2.0;
-                double req = Math.Clamp(_W * f, _W * rDown, _W * rUp);
+                double req = Math.Clamp(_W * scale, _W * rDown, _W * rUp);
                 _W = Math.Clamp(req, _wMin, _wMax);
             }
+
             _beta = (relY < 0.8 && relM1 < 0.8) ? 0.5 : 0.25;
+        }
+
+        private void AdaptState(double Y, double sigY, double m1, double varM1)
+        {
+            double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
+            double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
+            double relMax = Math.Max(relY, relM1);
+
+            bool changeDetected = RateChange(m1);
+            bool degraded = double.IsNaN(sigY) || double.IsInfinity(sigY);
+
+            switch (_fsm)
+            {
+                case FSM.Warmup:
+                    if (!degraded && double.IsFinite(relMax)) _fsm = FSM.Track;
+                    break;
+
+                case FSM.Track:
+                    if (_fsm == FSM.LowRate) break;
+                    if (degraded)
+                    {
+                        _fsm = FSM.Degraded;
+                        break;
+                    }
+                    if (changeDetected)
+                    {
+                        _fsm = FSM.Hold;
+                        _beta = 0.1;
+                        break;
+                    }
+                    if (relMax > 1.0 && _W < _wMax)
+                    {
+                        _fsm = FSM.Expand;
+                    }
+                    else if (relMax < 0.5 && _W > _wMin)
+                    {
+                        _fsm = FSM.Contract;
+                    }
+                    break;
+
+                case FSM.Expand:
+                    AdaptWindow(Y, sigY, m1, varM1);
+                    if (relMax <= 1.0 || _W >= _wMax) _fsm = FSM.Track;
+                    break;
+
+                case FSM.Contract:
+                    AdaptWindow(Y, sigY, m1, varM1);
+                    if (relMax >= 0.8 || _W <= _wMin) _fsm = FSM.Track;
+                    break;
+
+                case FSM.Hold:
+                    _beta = 0.1;
+                    if (!changeDetected) _fsm = FSM.Track;
+                    break;
+
+                case FSM.LowRate:
+                    _tgIdx = 0;
+                    _W = Math.Min(_W * 1.2, _wMax);
+                    if (Y > 0 && sigY > 0 && (Y / sigY) >= _zMin) _fsm = FSM.Track;
+                    break;
+
+                case FSM.Degraded:
+                    _tgIdx = 0;
+                    _W = Math.Min(_W * 1.5, _wMax);
+                    if (!degraded && sigY > 0 && double.IsFinite(sigY)) _fsm = FSM.Track;
+                    break;
+            }
+
+            if (_fsm == FSM.Track)
+            {
+                AdaptWindow(Y, sigY, m1, varM1);
+            }
         }
 
         public double Beta
@@ -355,12 +506,12 @@ namespace Listen_N
             }
 
             // Compute factorial moments over gates within current window
-            public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N)
+            public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, out MomentCovariance cov)
             {
                 int binsPerGate = Math.Max(1, gateUs / DeltaUs);
                 int gatesInWindow = Math.Max(1, (int)Math.Floor(wSec * 1e6 / gateUs));
                 N = Math.Min(gatesInWindow, MaxBins / binsPerGate);
-                if (N <= 0) { m1 = m2 = m3 = 0; return; }
+                if (N <= 0) { m1 = m2 = m3 = 0; cov = new MomentCovariance(); return; }
 
                 int windowBins = N * binsPerGate;
                 int startPhys = _head + (MaxBins - windowBins);
@@ -372,6 +523,8 @@ namespace Listen_N
                 for (int b = 0; b < binsPerGate; b++) sum += _counts[(startPhys + b) % MaxBins];
 
                 long s1 = 0, s2 = 0, s3 = 0;
+                double sumN2 = 0, sumF22 = 0, sumF32 = 0;
+                double sumNF2 = 0, sumNF3 = 0, sumF2F3 = 0;
                 int binPtr = (startPhys + binsPerGate) % MaxBins;
 
                 // slide gate across window
@@ -381,6 +534,16 @@ namespace Listen_N
                     s1 += nj;
                     s2 += (long)nj * (nj - 1);
                     s3 += (long)nj * (nj - 1) * (nj - 2);
+
+                    double f2 = (double)nj * (nj - 1);
+                    double f3 = (double)nj * (nj - 1) * (nj - 2);
+
+                    sumN2 += (double)nj * nj;
+                    sumF22 += f2 * f2;
+                    sumF32 += f3 * f3;
+                    sumNF2 += nj * f2;
+                    sumNF3 += nj * f3;
+                    sumF2F3 += f2 * f3;
 
                     if (g < N - 1)
                     {
@@ -398,6 +561,18 @@ namespace Listen_N
                 m1 = s1 * invN;
                 m2 = s2 * invN;
                 m3 = s3 * invN;
+
+                // sample covariance of gate-level factorial moments
+                double varN = Math.Max(0.0, (sumN2 - N * m1 * m1) / Math.Max(1, N - 1));
+                double varF2 = Math.Max(0.0, (sumF22 - N * m2 * m2) / Math.Max(1, N - 1));
+                double varF3 = Math.Max(0.0, (sumF32 - N * m3 * m3) / Math.Max(1, N - 1));
+                double covNF2 = (sumNF2 - N * m1 * m2) / Math.Max(1, N - 1);
+                double covNF3 = (sumNF3 - N * m1 * m3) / Math.Max(1, N - 1);
+                double covF2F3 = (sumF2F3 - N * m2 * m3) / Math.Max(1, N - 1);
+
+                double invN2 = 1.0 / Math.Max(1, N);
+                cov = new MomentCovariance(varN * invN2, varF2 * invN2, varF3 * invN2,
+                    covNF2 * invN2, covNF3 * invN2, covF2F3 * invN2);
             }
 
             public long LeftEdgeUs => _t0Us;
