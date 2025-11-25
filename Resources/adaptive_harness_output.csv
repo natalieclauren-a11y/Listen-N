@@ -1,0 +1,5 @@
+scenario,estimate_index,now_us,fsm_state,tg_us,W_sec,S_sec,tau_hat_sec,m1_hat,m2_hat,m3_hat,Y_hat,sigma_Y,has_significance,is_low_rate,is_degraded,is_stats_bound,insufficient_statistics,model_mismatch
+stable_high_rate,0,2000000,Warmup,1000,2,0,NaN,0,0,0,0,Infinity,False,False,False,False,True,False
+stable_low_rate,0,2000000,Warmup,1000,2,0,NaN,0,0,0,0,Infinity,False,False,False,False,True,False
+slowly_drifting_rate,0,2000000,Warmup,1000,2,0,NaN,0,0,0,0,Infinity,False,False,False,False,True,False
+sudden_jump_rate,0,2000000,Warmup,1000,2,0,NaN,0,0,0,0,Infinity,False,False,False,False,True,False
