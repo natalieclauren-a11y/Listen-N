@@ -189,7 +189,24 @@ namespace Listen_N
                 _acc.ComputeMoments(_W, _tgUs[k],
                     out var m1, out var m2, out var m3, out var N);
 
-                // placeholder for computing Y and uncertainty
+                // compute Feynman-Y and a rough uncertainty estimate using delta method
+                var y = MomentsMath.Y(m1, m2);
+                Yk[k] = y;
+
+                double sigY = double.PositiveInfinity;
+                if (N > 1)
+                {
+                    // sample variance of m1 derived from gate counts
+                    double varM1 = Math.Max(0.0, (m2 + m1 - m1 * m1) / Math.Max(1, N - 1));
+
+                    // rough variance of the second factorial moment using available moments
+                    double varM2 = Math.Max(0.0, (m3 + 4 * m2 + 2 * m1 - m2 * m2) / Math.Max(1, N - 1));
+
+                    double varY = MomentsMath.VarY(m1, m2, varM1, varM2, 0);
+                    sigY = double.IsFinite(varY) && varY > 0 ? Math.Sqrt(varY) : double.PositiveInfinity;
+                }
+
+                sigYk[k] = sigY;
 
                 if (k == _tgIdx)
                 {
@@ -198,8 +215,8 @@ namespace Listen_N
                     selM2 = m2;
                     selM3 = m3;
                     selN = N;
-                    selY = Yk[k];
-                    selSigY = sigYk[k];
+                    selY = y;
+                    selSigY = sigY;
                 }
             }
 
@@ -212,9 +229,9 @@ namespace Listen_N
                 M1 = selM1,
                 Y = selY,
                 SigmaY = selSigY,
-                ZY = selSigY > 0 ? selY / selSigY : 0,
+                ZY = selSigY > 0 && double.IsFinite(selSigY) ? selY / selSigY : 0,
                 State = _fsm.ToString(),
-                HasSignificance = true
+                HasSignificance = selSigY > 0 && double.IsFinite(selSigY)
             };
 
             // log estimate
