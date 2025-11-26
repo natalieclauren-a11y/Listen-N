@@ -140,7 +140,7 @@ namespace Listen_N
         private double _cpZyMean, _cpZyCum;
 
         public AdaptiveWindowEngine(
-            int baseDeltaUs = 500,
+            int baseDeltaUs = 50,
             double windowStartSec = 2.0,
             double windowMinSec = 0.5,
             double windowMaxSec = 60.0,
@@ -150,7 +150,6 @@ namespace Listen_N
             double epsM1 = 0.02,
             bool startWorker = true)
         {
-            _deltaUs = baseDeltaUs;
             _tgUs = gateLadderUs ?? new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
             _tgIsMilliseconds = _tgUs.Length > 0 && _tgUs[0] < 100;
             _tgIdx = Math.Min(1, _tgUs.Length - 1);
@@ -162,6 +161,8 @@ namespace Listen_N
             _epsY = epsY;
             _epsM1 = epsM1;
             _startWorker = startWorker;
+
+            _deltaUs = Math.Max(baseDeltaUs, Math.Max(10, GateWidthUs(0) / 10));
 
             // initialize accumulator and channel infrastructure
             _acc = new BaseBinAccumulator(_deltaUs, _wMax);
@@ -753,6 +754,8 @@ namespace Listen_N
                 _counts = new int[MaxBins];
             }
 
+            public long RightEdgeUs => _t0Us + (long)MaxBins * DeltaUs;
+
             // Slide buffer left to new time origin
             public void SlideLeftTo(long newT0Us)
             {
@@ -785,6 +788,14 @@ namespace Listen_N
                 _total++;
             }
 
+            public void ResetTo(long tUs)
+            {
+                Array.Clear(_counts, 0, _counts.Length);
+                _head = 0;
+                _total = 0;
+                _t0Us = (tUs / DeltaUs) * DeltaUs;
+            }
+
             // Compute factorial moments over gates within current window
             public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, out MomentCovariance cov)
             {
@@ -793,10 +804,7 @@ namespace Listen_N
                 N = Math.Min(gatesInWindow, MaxBins / binsPerGate);
                 if (N <= 0) { m1 = m2 = m3 = 0; cov = new MomentCovariance(); return; }
 
-                int windowBins = N * binsPerGate;
-                int startPhys = _head + (MaxBins - windowBins);
-                while (startPhys < 0) startPhys += MaxBins;
-                startPhys %= MaxBins;
+                int startPhys = _head;
 
                 // initial sum for first gate
                 int sum = 0;
