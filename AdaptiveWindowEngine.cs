@@ -190,14 +190,8 @@ namespace Listen_N
             while (_running)
             {
                 DrainInbound(r);
-                InitializeNextStep();
-
                 long nowUs = _acc.LeftEdgeUs + (long)(_W * 1e6);
-                while (_nextStepUs != 0 && nowUs >= _nextStepUs)
-                {
-                    Step(_nextStepUs);
-                    _nextStepUs = _nextStepUs + (long)(StepSizeSec() * 1e6);
-                }
+                ProcessSteps(nowUs, r, drainInbound: false);
                 Thread.SpinWait(256);
             }
         }
@@ -215,17 +209,33 @@ namespace Listen_N
             while (r.TryRead(out var d)) _acc.Add(d.TicksUs);
         }
 
-        public void ForceEstimate(long nowUs)
+        private void ProcessSteps(long nowUs, ChannelReader<Detection>? reader = null, bool drainInbound = true)
         {
-            DrainInbound();
+            if (drainInbound)
+            {
+                DrainInbound(reader);
+            }
+
             InitializeNextStep();
             if (_nextStepUs == 0) return;
 
-            while (nowUs >= _nextStepUs)
+            _acc.SlideLeftTo(nowUs - (long)(_wMax * 1e6));
+
+            while (_nextStepUs != 0 && nowUs >= _nextStepUs)
             {
                 Step(_nextStepUs);
                 _nextStepUs = _nextStepUs + (long)(StepSizeSec() * 1e6);
             }
+        }
+
+        public void ForceEstimate(long nowUs)
+        {
+            ForceStep(nowUs);
+        }
+
+        public void ForceStep(long nowUs)
+        {
+            ProcessSteps(nowUs);
         }
 
         // Compute adaptive step size for sliding window
