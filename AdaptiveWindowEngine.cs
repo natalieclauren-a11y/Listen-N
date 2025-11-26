@@ -84,6 +84,10 @@ namespace Listen_N
             set => _etaFrac = Math.Max(0, value);
         }
 
+        public int DebugEventCount => _acc.TotalEvents;
+
+        public int DebugBinsWithCounts => _acc.CountNonEmptyBins();
+
         // ——— runtime state ———
         private readonly BaseBinAccumulator _acc; // accumulator of counts
         private readonly Channel<Detection> _inbound; // inbound channel
@@ -114,6 +118,7 @@ namespace Listen_N
         private int _tgConfirmations = 0;
 
         private int _tgIdx;      // current gate index in ladder
+        private bool _tgIsMilliseconds;
         private double _W;       // current window size (s)
         private double _beta;    // step fraction for sliding window
         private double _S;       // step size (s)
@@ -135,7 +140,7 @@ namespace Listen_N
         private double _cpZyMean, _cpZyCum;
 
         public AdaptiveWindowEngine(
-            int baseDeltaUs = 500,
+            int baseDeltaUs = 50,
             double windowStartSec = 2.0,
             double windowMinSec = 0.5,
             double windowMaxSec = 60.0,
@@ -145,8 +150,8 @@ namespace Listen_N
             double epsM1 = 0.02,
             bool startWorker = true)
         {
-            _deltaUs = baseDeltaUs;
             _tgUs = gateLadderUs ?? new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
+            _tgIsMilliseconds = _tgUs.Length > 0 && _tgUs[0] < 100;
             _tgIdx = Math.Min(1, _tgUs.Length - 1);
             _wMin = windowMinSec;
             _wMax = windowMaxSec;
@@ -156,6 +161,8 @@ namespace Listen_N
             _epsY = epsY;
             _epsM1 = epsM1;
             _startWorker = startWorker;
+
+            _deltaUs = Math.Max(baseDeltaUs, Math.Max(10, GateWidthUs(0) / 10));
 
             // initialize accumulator and channel infrastructure
             _acc = new BaseBinAccumulator(_deltaUs, _wMax);
@@ -219,12 +226,9 @@ namespace Listen_N
             InitializeNextStep();
             if (_nextStepUs == 0) return;
 
-            _acc.SlideLeftTo(nowUs - (long)(_wMax * 1e6));
-
             while (_nextStepUs != 0 && nowUs >= _nextStepUs)
             {
                 Step(_nextStepUs);
-                _nextStepUs = _nextStepUs + (long)(StepSizeSec() * 1e6);
             }
         }
 
@@ -236,6 +240,10 @@ namespace Listen_N
         public void ForceStep(long nowUs)
         {
             ProcessSteps(nowUs);
+            if (!_startWorker)
+            {
+                Console.WriteLine($"ForceStep: events={DebugEventCount}, bins_with_counts={DebugBinsWithCounts}");
+            }
         }
 
         // Compute adaptive step size for sliding window
@@ -246,11 +254,30 @@ namespace Listen_N
             return _S;
         }
 
+        private int GateWidthUs(int idx) => _tgIsMilliseconds ? _tgUs[idx] * 1000 : _tgUs[idx];
+
         // Perform one analysis step
         private void Step(long nowUs)
         {
-            // Slide accumulator to discard old bins
-            _acc.SlideLeftTo(nowUs - (long)(_wMax * 1e6));
+            RunAnalysis(nowUs);
+            _nextStepUs = nowUs + (long)(StepSizeSec() * 1e6);
+        }
+
+        private void RunAnalysis(long nowUs)
+        {
+            long desiredLeft = nowUs - (long)(_W * 1e6);
+
+            if (desiredLeft > _acc.RightEdgeUs)
+            {
+                // Wide synthetic gaps: reset rather than wiping the buffer via sliding.
+                _acc.ResetTo(nowUs);
+                return;
+            }
+
+            long safeLeft = Math.Min(desiredLeft, _acc.RightEdgeUs - (long)(_W * 1e6));
+            safeLeft = Math.Max(0, safeLeft);
+
+            _acc.SlideLeftTo(safeLeft);
 
             _statsBound = false;
             _modelMismatch = false;
@@ -275,7 +302,8 @@ namespace Listen_N
             // loop across ladder of gate widths
             for (int k = 0; k < _tgUs.Length; k++)
             {
-                _acc.ComputeMoments(_W, _tgUs[k],
+                int gateUs = GateWidthUs(k);
+                _acc.ComputeMoments(_W, gateUs,
                     out var m1, out var m2, out var m3, out var N,
                     out var rawCov);
 
@@ -320,7 +348,7 @@ namespace Listen_N
 
                 if (hasSig && k > 0 && significantIdx >= 0 && k >= significantIdx)
                 {
-                    double dlog = Math.Log((double)_tgUs[k] / _tgUs[k - 1]);
+                    double dlog = Math.Log((double)GateWidthUs(k) / GateWidthUs(k - 1));
                     if (dlog > 0)
                     {
                         double slope = Math.Abs((Yk[k] - Yk[k - 1]) / dlog);
@@ -358,13 +386,13 @@ namespace Listen_N
 
             _insufficientStatistics = significantIdx < 0 || selSigY <= 0 || double.IsInfinity(selSigY);
 
-            AdaptState(nowUs, selY, selSigY, selM1, selV11, hasAnySignificance, singlesChange, correlationChange, degraded);
+            AdaptState(nowUs, selY, selSigY, selM1, selV11, selN, hasAnySignificance, singlesChange, correlationChange, degraded);
 
             // package results into Estimate
             var est = new Estimate
             {
                 NowUs = nowUs,
-                GateUs = _tgUs[_tgIdx],
+                GateUs = GateWidthUs(_tgIdx),
                 WindowSec = _W,
                 M1 = selM1,
                 M2 = selM2,
@@ -385,7 +413,7 @@ namespace Listen_N
             var log = PreflightOracle.Run(
                 DateTime.UtcNow,
                 _fsm.ToString(),
-                _tgUs[_tgIdx],
+                GateWidthUs(_tgIdx),
                 _W,
                 selN,
                 selM1,
@@ -462,7 +490,7 @@ namespace Listen_N
             _beta = BetaForState(_fsm);
         }
 
-        private void AdaptState(long nowUs, double Y, double sigY, double m1, double varM1, bool hasSignificance, bool singlesChange, bool correlationChange, bool degraded)
+        private void AdaptState(long nowUs, double Y, double sigY, double m1, double varM1, int gatesUsed, bool hasSignificance, bool singlesChange, bool correlationChange, bool degraded)
         {
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
@@ -473,8 +501,10 @@ namespace Listen_N
             {
                 case FSM.Warmup:
                     _beta = BetaForState(_fsm);
-                    if ((nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6)) RequestFsmState(FSM.Track, nowUs);
-                    else if (hasSignificance && !degraded) RequestFsmState(FSM.Track, nowUs);
+                    bool windowFilled = (nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6);
+                    bool enoughGates = gatesUsed >= 2;
+                    bool positiveM1 = m1 > 0;
+                    if (windowFilled && enoughGates && positiveM1) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Track:
@@ -562,6 +592,7 @@ namespace Listen_N
 
         private void EnterState(FSM target, long nowUs)
         {
+            var prev = _fsm;
             _fsm = target;
             _pendingFsm = target;
             _fsmConfirmations = 0;
@@ -588,6 +619,11 @@ namespace Listen_N
                     _holdQuietUntilUs = 0;
                     _beta = BetaForState(target);
                     break;
+            }
+
+            if (prev == FSM.Warmup && target == FSM.Track)
+            {
+                _S = 0.1 * _W;
             }
         }
 
@@ -657,7 +693,7 @@ namespace Listen_N
                     double w = 1.0 / (sigY[i] * sigY[i]);
                     wSum += w;
                     ySum += w * Y[i];
-                    double t = _tgUs[i] / 1e6;
+                    double t = GateWidthUs(i) / 1e6;
                     minT = Math.Min(minT, t);
                     maxT = Math.Max(maxT, t);
                 }
@@ -684,7 +720,7 @@ namespace Listen_N
                 {
                     if (sigY[i] <= 0 || !double.IsFinite(sigY[i]) || !double.IsFinite(Y[i])) continue;
                     double w = 1.0 / (sigY[i] * sigY[i]);
-                    double t = _tgUs[i] / 1e6;
+                    double t = GateWidthUs(i) / 1e6;
                     double model = yInf * (1.0 - Math.Exp(-t / tau));
                     double diff = Y[i] - model;
                     err += w * diff * diff;
@@ -702,7 +738,7 @@ namespace Listen_N
                 for (int i = 0; i < n; i++)
                 {
                     if (sigY[i] <= 0 || !double.IsFinite(sigY[i]) || !double.IsFinite(Y[i])) continue;
-                    double t = _tgUs[i] / 1e6;
+                    double t = GateWidthUs(i) / 1e6;
                     double model = yInf * (1.0 - Math.Exp(-t / bestTau));
                     resArr.Add(Y[i] - model);
                 }
@@ -728,6 +764,8 @@ namespace Listen_N
                 MaxBins = (int)Math.Ceiling(wmaxSec * 1e6 / deltaUs);
                 _counts = new int[MaxBins];
             }
+
+            public long RightEdgeUs => _t0Us + (long)MaxBins * DeltaUs;
 
             // Slide buffer left to new time origin
             public void SlideLeftTo(long newT0Us)
@@ -761,6 +799,14 @@ namespace Listen_N
                 _total++;
             }
 
+            public void ResetTo(long tUs)
+            {
+                Array.Clear(_counts, 0, _counts.Length);
+                _head = 0;
+                _total = 0;
+                _t0Us = (tUs / DeltaUs) * DeltaUs;
+            }
+
             // Compute factorial moments over gates within current window
             public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, out MomentCovariance cov)
             {
@@ -769,10 +815,7 @@ namespace Listen_N
                 N = Math.Min(gatesInWindow, MaxBins / binsPerGate);
                 if (N <= 0) { m1 = m2 = m3 = 0; cov = new MomentCovariance(); return; }
 
-                int windowBins = N * binsPerGate;
-                int startPhys = _head + (MaxBins - windowBins);
-                while (startPhys < 0) startPhys += MaxBins;
-                startPhys %= MaxBins;
+                int startPhys = _head;
 
                 // initial sum for first gate
                 int sum = 0;
@@ -833,6 +876,18 @@ namespace Listen_N
 
             public long LeftEdgeUs => _t0Us;
             public int SinglesInWindow => _total;
+            public int TotalEvents => _total;
+
+            public int CountNonEmptyBins()
+            {
+                int bins = 0;
+                for (int i = 0; i < MaxBins; i++)
+                {
+                    if (_counts[i] > 0) bins++;
+                }
+
+                return bins;
+            }
         }
 
         // Math utilities for Y statistic and error propagation
