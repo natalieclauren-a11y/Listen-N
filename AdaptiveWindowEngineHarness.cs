@@ -11,6 +11,10 @@ namespace Listen_N
     /// </summary>
     public static class SyntheticTimestampGenerator
     {
+        internal const double DefaultBurstRateHz = 200.0;
+        internal const double DefaultMeanMultiplicity = 3.0;
+        internal const double DefaultIntraBurstStdUs = 50.0;
+
         public static IEnumerable<long> StableHighRate(int seed, double durationSec = 8.0)
             => Generate(durationSec, _ => 5_000.0, seed);
 
@@ -38,6 +42,47 @@ namespace Listen_N
                 yield return (long)tUs;
             }
         }
+
+        public static IEnumerable<long> CorrelatedBurstSource(
+            int seed,
+            double durationSec = 10.0,
+            double burstRateHz = DefaultBurstRateHz,
+            double meanMultiplicity = DefaultMeanMultiplicity,
+            double intraBurstStdUs = DefaultIntraBurstStdUs)
+        {
+            var rng = new Random(seed);
+            double tUs = 0.0;
+            double endUs = durationSec * 1e6;
+
+            while (tUs < endUs)
+            {
+                // time to next burst: exponential spacing
+                double u = Math.Clamp(rng.NextDouble(), double.Epsilon, 1.0);
+                double dtToBurstUs = -Math.Log(u) * (1e6 / burstRateHz);
+                tUs += dtToBurstUs;
+                if (tUs >= endUs) yield break;
+
+                // multiplicity: Poisson-distributed around meanMultiplicity
+                int mult = Math.Max(1, (int)Math.Round(
+                    -Math.Log(Math.Clamp(rng.NextDouble(), double.Epsilon, 1.0)) * meanMultiplicity));
+
+                // generate individual timestamps inside the burst
+                for (int i = 0; i < mult; i++)
+                {
+                    double jitter = rng.NextGaussian() * intraBurstStdUs;
+                    long ts = (long)(tUs + Math.Max(0, jitter));
+                    if (ts < endUs) yield return ts;
+                }
+            }
+        }
+
+        private static double NextGaussian(this Random rng)
+        {
+            // Box–Muller
+            double u1 = 1.0 - rng.NextDouble();
+            double u2 = 1.0 - rng.NextDouble();
+            return Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
+        }
     }
 
     /// <summary>
@@ -54,7 +99,14 @@ namespace Listen_N
                 new Scenario("stable_high_rate", SyntheticTimestampGenerator.StableHighRate(seed: 1337)),
                 new Scenario("stable_low_rate", SyntheticTimestampGenerator.StableLowRate(seed: 2024)),
                 new Scenario("slowly_drifting_rate", SyntheticTimestampGenerator.SlowlyDriftingRate(seed: 4242)),
-                new Scenario("sudden_jump_rate", SyntheticTimestampGenerator.SuddenJumpRate(seed: 9001))
+                new Scenario("sudden_jump_rate", SyntheticTimestampGenerator.SuddenJumpRate(seed: 9001)),
+                new Scenario("correlated_bursts",
+                    SyntheticTimestampGenerator.CorrelatedBurstSource(
+                        seed: 7777,
+                        durationSec: 10.0,
+                        burstRateHz: SyntheticTimestampGenerator.DefaultBurstRateHz,
+                        meanMultiplicity: SyntheticTimestampGenerator.DefaultMeanMultiplicity,
+                        intraBurstStdUs: SyntheticTimestampGenerator.DefaultIntraBurstStdUs))
             };
 
             using var writer = new StreamWriter(csvPath);
