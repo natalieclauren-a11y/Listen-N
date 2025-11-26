@@ -265,19 +265,8 @@ namespace Listen_N
 
         private void RunAnalysis(long nowUs)
         {
-            long desiredLeft = nowUs - (long)(_W * 1e6);
-
-            if (desiredLeft > _acc.RightEdgeUs)
-            {
-                // Wide synthetic gaps: reset rather than wiping the buffer via sliding.
-                _acc.ResetTo(nowUs);
-                return;
-            }
-
-            long safeLeft = Math.Min(desiredLeft, _acc.RightEdgeUs - (long)(_W * 1e6));
-            safeLeft = Math.Max(0, safeLeft);
-
-            _acc.SlideLeftTo(safeLeft);
+            long leftEdgeUs = Math.Max(0, nowUs - (long)(_W * 1e6));
+            _acc.SlideLeftTo(leftEdgeUs);
 
             _statsBound = false;
             _modelMismatch = false;
