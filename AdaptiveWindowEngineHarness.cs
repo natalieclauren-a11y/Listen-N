@@ -129,12 +129,20 @@ namespace Listen_N
             long lastTs = 0;
             foreach (long t in scenario.Timestamps)
             {
+                if (t < lastTs)
+                {
+                    throw new InvalidOperationException("Synthetic timestamps must be monotonically non-decreasing.");
+                }
+
                 lastTs = t;
                 engine.OnDetection(new Detection(t));
-                engine.ForceEstimate(t);
+                engine.ForceStep(t);
             }
 
-            engine.ForceEstimate(lastTs);
+            if (lastTs > 0)
+            {
+                engine.ForceStep(lastTs);
+            }
             writer.Flush();
         }
     }
