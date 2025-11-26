@@ -78,7 +78,9 @@ namespace Listen_N
                 "is_degraded",
                 "is_stats_bound",
                 "insufficient_statistics",
-                "model_mismatch"
+                "model_mismatch",
+                "debug_event_count",
+                "debug_bins_with_counts"
             }));
 
             foreach (var scenario in scenarios)
@@ -121,7 +123,9 @@ namespace Listen_N
                     est.IsDegraded.ToString(CultureInfo.InvariantCulture),
                     est.IsStatsBound.ToString(CultureInfo.InvariantCulture),
                     est.InsufficientStatistics.ToString(CultureInfo.InvariantCulture),
-                    est.ModelMismatch.ToString(CultureInfo.InvariantCulture)
+                    est.ModelMismatch.ToString(CultureInfo.InvariantCulture),
+                    engine.DebugEventCount.ToString(CultureInfo.InvariantCulture),
+                    engine.DebugBinsWithCounts.ToString(CultureInfo.InvariantCulture)
                 }));
                 estimateIdx++;
             };
