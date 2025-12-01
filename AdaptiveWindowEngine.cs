@@ -67,6 +67,7 @@ namespace Listen_N
         private readonly double _wMin;  // min window size (s)
         private readonly double _wMax;  // max window size (s)
         private int _zMin = 3;          // minimum significance threshold
+        private int _minGateCountForZ;  // minimum gate count to include in max |Z|
 
         public int Zmin
         {
@@ -106,6 +107,12 @@ namespace Listen_N
         {
             get => _etaFrac;
             set => _etaFrac = Math.Max(0, value);
+        }
+
+        public int MinGateCountForZ
+        {
+            get => _minGateCountForZ;
+            set => _minGateCountForZ = Math.Max(0, value);
         }
 
         public int DebugEventCount => _acc.TotalEvents;
@@ -180,7 +187,8 @@ namespace Listen_N
             int zMin = 3,
             double epsY = 0.10,
             double epsM1 = 0.02,
-            bool startWorker = true)
+            bool startWorker = true,
+            int minGateCountForZ = 0)
         {
             _tgUs = gateLadderUs ?? new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
             _tgIsMilliseconds = _tgUs.Length > 0 && _tgUs[0] < 100;
@@ -196,6 +204,7 @@ namespace Listen_N
             _epsY = epsY;
             _epsM1 = epsM1;
             _startWorker = startWorker;
+            _minGateCountForZ = Math.Max(0, minGateCountForZ);
 
             _deltaUs = Math.Max(baseDeltaUs, Math.Max(10, GateWidthUs(0) / 10));
 
@@ -387,12 +396,13 @@ namespace Listen_N
                 }
 
                 sigYk[k] = sigY;
-                if (sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y))
+                bool validGate = sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y);
+                bool includeInZ = validGate && k > 0 && N >= _minGateCountForZ;
+                if (includeInZ)
                 {
                     double z = Math.Abs(y / sigY);
                     if (z > maxAbsZ) maxAbsZ = z;
                 }
-                bool validGate = sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y);
                 if (validGate)
                 {
                     anyValidY = true;
