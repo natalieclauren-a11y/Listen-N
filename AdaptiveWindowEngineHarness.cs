@@ -149,12 +149,12 @@ namespace Listen_N
                 "debug_bins_with_counts"
             }));
 
-            using var engine = new AdaptiveWindowEngine(startWorker: false);
             var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
             var stepField = typeof(AdaptiveWindowEngine).GetField("_S", BindingFlags.Instance | BindingFlags.NonPublic);
 
             foreach (var scenario in scenarios)
             {
+                using var engine = new AdaptiveWindowEngine(startWorker: false);
                 RunScenario(scenario, engine, tauField, stepField, writer);
             }
 
