@@ -151,9 +151,9 @@ namespace Listen_N
 
         private double _zTrack = 3.0;
         private double _zHold = 6.0;
-        private double _zPoisson = 2.0;
-        private readonly int _poissonQuietRequired = 3;
-        private int _poissonQuietStreak = 0;
+        private double _zPoisson = 4.0;
+        private readonly int _poissonQuietRequired = 1;
+        private int _poissonQuietStreak = 1;
 
         private double _tauHat = double.NaN;
         private double[] _corrResiduals = Array.Empty<double>();
