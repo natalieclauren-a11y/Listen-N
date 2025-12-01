@@ -53,6 +53,7 @@ namespace Listen_N
             var rng = new Random(seed);
             double tUs = 0.0;
             double endUs = durationSec * 1e6;
+            long lastTs = 0;
 
             while (tUs < endUs)
             {
@@ -60,6 +61,8 @@ namespace Listen_N
                 double u = Math.Clamp(rng.NextDouble(), double.Epsilon, 1.0);
                 double dtToBurstUs = -Math.Log(u) * (1e6 / burstRateHz);
                 tUs += dtToBurstUs;
+                if (tUs < lastTs)
+                    tUs = lastTs;
                 if (tUs >= endUs) yield break;
 
                 // multiplicity: Poisson-distributed around meanMultiplicity
@@ -70,7 +73,10 @@ namespace Listen_N
                 for (int i = 0; i < mult; i++)
                 {
                     double jitter = rng.NextGaussian() * intraBurstStdUs;
-                    long ts = (long)(tUs + Math.Max(0, jitter));
+                    long ts = (long)(tUs + jitter);
+                    if (ts < lastTs)
+                        ts = lastTs;
+                    lastTs = ts;
                     if (ts < endUs) yield return ts;
                 }
             }
