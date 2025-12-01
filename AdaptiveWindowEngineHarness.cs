@@ -61,6 +61,8 @@ namespace Listen_N
                 double u = Math.Clamp(rng.NextDouble(), double.Epsilon, 1.0);
                 double dtToBurstUs = -Math.Log(u) * (1e6 / burstRateHz);
                 tUs += dtToBurstUs;
+                if (tUs < lastTs)
+                    tUs = lastTs;
                 if (tUs >= endUs) yield break;
 
                 // multiplicity: Poisson-distributed around meanMultiplicity
