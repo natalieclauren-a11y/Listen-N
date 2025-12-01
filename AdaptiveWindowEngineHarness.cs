@@ -145,6 +145,8 @@ namespace Listen_N
                 "is_stats_bound",
                 "insufficient_statistics",
                 "model_mismatch",
+                "max_abs_z",
+                "poisson_quiet_streak",
                 "debug_event_count",
                 "debug_bins_with_counts"
             }));
@@ -204,6 +206,8 @@ namespace Listen_N
                     est.IsStatsBound.ToString(CultureInfo.InvariantCulture),
                     est.InsufficientStatistics.ToString(CultureInfo.InvariantCulture),
                     est.ModelMismatch.ToString(CultureInfo.InvariantCulture),
+                    est.MaxAbsZ.ToString(CultureInfo.InvariantCulture),
+                    est.PoissonQuietStreak.ToString(CultureInfo.InvariantCulture),
                     engine.DebugEventCount.ToString(CultureInfo.InvariantCulture),
                     engine.DebugBinsWithCounts.ToString(CultureInfo.InvariantCulture)
                 }));

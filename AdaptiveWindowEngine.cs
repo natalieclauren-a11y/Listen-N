@@ -55,6 +55,8 @@ namespace Listen_N
             public bool IsStatsBound { get; init; }
             public bool InsufficientStatistics { get; init; }
             public bool ModelMismatch { get; init; }
+            public double MaxAbsZ { get; init; }
+            public int PoissonQuietStreak { get; init; }
         }
 
         public event Action<Estimate>? OnEstimate; // callback for new estimates
@@ -474,7 +476,9 @@ namespace Listen_N
                 IsDegraded = _fsm == FSM.Degraded,
                 IsStatsBound = _statsBound,
                 InsufficientStatistics = _insufficientStatistics,
-                ModelMismatch = _modelMismatch
+                ModelMismatch = _modelMismatch,
+                MaxAbsZ = maxAbsZ,
+                PoissonQuietStreak = _poissonQuietStreak
             };
 
             // log estimate
