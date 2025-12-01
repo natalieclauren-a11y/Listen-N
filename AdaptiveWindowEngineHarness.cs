@@ -18,8 +18,8 @@ namespace Listen_N
 
         public static IEnumerable<long> StablePoissonLong(
             int seed,
-            double durationSec = 30.0,
-            double rateHz = 500.0)
+            double durationSec = 5.0,
+            double rateHz = 300.0)
             => Generate(durationSec, _ => rateHz, seed);
 
         public static IEnumerable<long> StableHighRate(int seed, double durationSec = 8.0)
