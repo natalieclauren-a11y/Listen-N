@@ -76,11 +76,8 @@ namespace Listen_N
                     long ts = (long)(tUs + jitter);
                     if (ts < lastTs)
                         ts = lastTs;
-                    if (ts < endUs)
-                    {
-                        yield return ts;
-                        lastTs = ts;
-                    }
+                    lastTs = ts;
+                    if (ts < endUs) yield return ts;
                 }
             }
         }
