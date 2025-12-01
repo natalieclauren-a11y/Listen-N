@@ -397,7 +397,8 @@ namespace Listen_N
 
                 sigYk[k] = sigY;
                 bool validGate = sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y);
-                bool includeInZ = validGate && k > 0 && N >= _minGateCountForZ;
+                // Exclude the two smallest gates where Poisson variance dominates and Z is unstable
+                bool includeInZ = validGate && k >= 2 && N >= _minGateCountForZ;
                 if (includeInZ)
                 {
                     double z = Math.Abs(y / sigY);
