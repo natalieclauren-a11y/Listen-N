@@ -16,6 +16,12 @@ namespace Listen_N
         internal const double DefaultMeanMultiplicity = 3.0;
         internal const double DefaultIntraBurstStdUs = 50.0;
 
+        public static IEnumerable<long> StablePoissonLong(
+            int seed,
+            double durationSec = 30.0,
+            double rateHz = 500.0)
+            => Generate(durationSec, _ => rateHz, seed);
+
         public static IEnumerable<long> StableHighRate(int seed, double durationSec = 8.0)
             => Generate(durationSec, _ => 5_000.0, seed);
 
@@ -103,6 +109,7 @@ namespace Listen_N
         {
             var scenarios = new[]
             {
+                new Scenario("stable_poisson_long", SyntheticTimestampGenerator.StablePoissonLong(seed: 8080)),
                 new Scenario("stable_high_rate", SyntheticTimestampGenerator.StableHighRate(seed: 1337)),
                 new Scenario("stable_low_rate", SyntheticTimestampGenerator.StableLowRate(seed: 2024)),
                 new Scenario("slowly_drifting_rate", SyntheticTimestampGenerator.SlowlyDriftingRate(seed: 4242)),
