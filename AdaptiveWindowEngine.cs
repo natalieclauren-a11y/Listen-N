@@ -72,6 +72,28 @@ namespace Listen_N
             set => _zMin = Math.Max(1, value);
         }
 
+        public double ZTrack
+        {
+            get => _zTrack;
+            set
+            {
+                _zTrack = Math.Max(0, value);
+                _zHold = Math.Max(_zHold, _zTrack);
+            }
+        }
+
+        public double ZHold
+        {
+            get => _zHold;
+            set => _zHold = Math.Max(_zTrack, value);
+        }
+
+        public double ZPoisson
+        {
+            get => _zPoisson;
+            set => _zPoisson = Math.Max(0, value);
+        }
+
         private double _epsY;     // target relative uncertainty for Y
         private double _epsM1;    // target relative uncertainty for M1
         private double _etaFrac = 0.05; // adaptation fraction
@@ -112,7 +134,7 @@ namespace Listen_N
         }
 
         // Finite State Machine states for adaptation
-        private enum FSM { Warmup, Track, Expand, Contract, Hold, LowRate, Degraded }
+        private enum FSM { Warmup, Poisson, Track, Expand, Contract, Hold, LowRate, Degraded }
         private FSM _fsm = FSM.Warmup;
 
         private int _pendingTgIdx = -1;
@@ -123,6 +145,12 @@ namespace Listen_N
         private double _W;       // current window size (s)
         private double _beta;    // step fraction for sliding window
         private double _S;       // step size (s)
+
+        private double _zTrack = 3.0;
+        private double _zHold = 6.0;
+        private double _zPoisson = 2.0;
+        private readonly int _poissonQuietRequired = 3;
+        private int _poissonQuietStreak = 0;
 
         private double _tauHat = double.NaN;
         private double[] _corrResiduals = Array.Empty<double>();
@@ -159,6 +187,8 @@ namespace Listen_N
             _W = windowStartSec;
             _beta = 0.1;
             _zMin = zMin;
+            _zTrack = Math.Max(1.0, zMin);
+            _zHold = Math.Max(_zHold, _zTrack + 3.0);
             _epsY = epsY;
             _epsM1 = epsM1;
             _startWorker = startWorker;
@@ -294,6 +324,7 @@ namespace Listen_N
 
             double[] Yk = new double[_tgUs.Length];
             double[] sigYk = new double[_tgUs.Length];
+            double maxAbsZ = 0;
 
             // covariance entries for selected gate
             double selV11 = 0, selV22 = 0, selV12 = 0;
@@ -324,6 +355,11 @@ namespace Listen_N
                 }
 
                 sigYk[k] = sigY;
+                if (sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y))
+                {
+                    double z = Math.Abs(y / sigY);
+                    if (z > maxAbsZ) maxAbsZ = z;
+                }
                 bool validGate = sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y);
                 if (validGate)
                 {
@@ -388,7 +424,7 @@ namespace Listen_N
 
             _insufficientStatistics = significantIdx < 0 || selSigY <= 0 || double.IsInfinity(selSigY);
 
-            AdaptState(nowUs, selY, selSigY, selM1, selV11, selN, hasAnySignificance, singlesChange, correlationChange, degraded);
+            AdaptState(nowUs, selY, selSigY, selM1, selV11, selN, hasAnySignificance, singlesChange, correlationChange, degraded, maxAbsZ);
 
             // package results into Estimate
             var est = new Estimate
@@ -492,7 +528,7 @@ namespace Listen_N
             _beta = BetaForState(_fsm);
         }
 
-        private void AdaptState(long nowUs, double Y, double sigY, double m1, double varM1, int gatesUsed, bool hasSignificance, bool singlesChange, bool correlationChange, bool degraded)
+        private void AdaptState(long nowUs, double Y, double sigY, double m1, double varM1, int gatesUsed, bool hasSignificance, bool singlesChange, bool correlationChange, bool degraded, double maxAbsZ)
         {
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
@@ -506,7 +542,55 @@ namespace Listen_N
                     bool windowFilled = (nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6);
                     bool enoughGates = gatesUsed >= 2;
                     bool positiveM1 = m1 > 0;
-                    if (windowFilled && enoughGates && positiveM1) RequestFsmState(FSM.Track, nowUs);
+                    if (maxAbsZ >= _zHold)
+                    {
+                        _poissonQuietStreak = 0;
+                        RequestFsmState(FSM.Hold, nowUs);
+                        break;
+                    }
+
+                    if (maxAbsZ >= _zTrack)
+                    {
+                        _poissonQuietStreak = 0;
+                        RequestFsmState(FSM.Track, nowUs);
+                        break;
+                    }
+
+                    if (windowFilled && enoughGates && positiveM1 && maxAbsZ < _zPoisson)
+                    {
+                        _poissonQuietStreak++;
+                        if (_poissonQuietStreak >= _poissonQuietRequired) RequestFsmState(FSM.Poisson, nowUs);
+                    }
+                    else if (windowFilled)
+                    {
+                        _poissonQuietStreak = 0;
+                    }
+                    else
+                    {
+                        _poissonQuietStreak = 0;
+                    }
+                    break;
+
+                case FSM.Poisson:
+                    _beta = BetaForState(_fsm);
+                    if (degraded)
+                    {
+                        RequestFsmState(FSM.Degraded, nowUs);
+                        break;
+                    }
+
+                    if (maxAbsZ >= _zHold)
+                    {
+                        RequestFsmState(FSM.Hold, nowUs);
+                    }
+                    else if (maxAbsZ >= _zTrack)
+                    {
+                        RequestFsmState(FSM.Track, nowUs);
+                    }
+                    else
+                    {
+                        _W = Math.Max(_W, TauLowerBound());
+                    }
                     break;
 
                 case FSM.Track:
@@ -598,6 +682,10 @@ namespace Listen_N
             _fsm = target;
             _pendingFsm = target;
             _fsmConfirmations = 0;
+            if (target != FSM.Warmup)
+            {
+                _poissonQuietStreak = 0;
+            }
             switch (target)
             {
                 case FSM.Hold:
