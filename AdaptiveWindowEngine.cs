@@ -94,6 +94,7 @@ namespace Listen_N
         private readonly Thread? _worker;             // worker thread
         private readonly bool _startWorker;
         private volatile bool _running = true;       // loop control flag
+        private long _lastTimestampUs = 0;           // last processed detection timestamp
 
         private readonly struct MomentCovariance
         {
@@ -213,7 +214,19 @@ namespace Listen_N
         private void DrainInbound(ChannelReader<Detection>? reader = null)
         {
             var r = reader ?? _inbound.Reader;
-            while (r.TryRead(out var d)) _acc.Add(d.TicksUs);
+            while (r.TryRead(out var d))
+            {
+                _acc.Add(d.TicksUs);
+                _lastTimestampUs = d.TicksUs;
+            }
+        }
+
+        // Reset timestamp-related state for a new scenario
+        public void ResetTimestampState(long firstTimestampUs)
+        {
+            _acc.ResetTo(firstTimestampUs);
+            _lastTimestampUs = 0;
+            _nextStepUs = 0;
         }
 
         private void ProcessSteps(long nowUs, ChannelReader<Detection>? reader = null, bool drainInbound = true)

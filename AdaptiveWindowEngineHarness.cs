@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 
 namespace Listen_N
@@ -141,22 +142,36 @@ namespace Listen_N
                 "debug_bins_with_counts"
             }));
 
+            using var engine = new AdaptiveWindowEngine(startWorker: false);
+            var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
+            var stepField = typeof(AdaptiveWindowEngine).GetField("_S", BindingFlags.Instance | BindingFlags.NonPublic);
+
             foreach (var scenario in scenarios)
             {
-                RunScenario(scenario, writer);
+                RunScenario(scenario, engine, tauField, stepField, writer);
             }
 
             Console.WriteLine($"Adaptive harness CSV written to {Path.GetFullPath(csvPath)}");
         }
 
-        private static void RunScenario(Scenario scenario, StreamWriter writer)
+        private static void RunScenario(
+            Scenario scenario,
+            AdaptiveWindowEngine engine,
+            FieldInfo? tauField,
+            FieldInfo? stepField,
+            StreamWriter writer)
         {
-            using var engine = new AdaptiveWindowEngine(startWorker: false);
-            var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
-            var stepField = typeof(AdaptiveWindowEngine).GetField("_S", BindingFlags.Instance | BindingFlags.NonPublic);
+            var timestamps = scenario.Timestamps.ToList();
+            if (timestamps.Count == 0)
+            {
+                writer.Flush();
+                return;
+            }
+
+            engine.ResetTimestampState(timestamps[0]);
 
             int estimateIdx = 0;
-            engine.OnEstimate += est =>
+            void OnEstimate(AdaptiveWindowEngine.Estimate est)
             {
                 double tau = tauField?.GetValue(engine) is double t ? t : double.NaN;
                 double step = stepField?.GetValue(engine) is double s ? s : double.NaN;
@@ -186,10 +201,12 @@ namespace Listen_N
                     engine.DebugBinsWithCounts.ToString(CultureInfo.InvariantCulture)
                 }));
                 estimateIdx++;
-            };
+            }
+
+            engine.OnEstimate += OnEstimate;
 
             long lastTs = 0;
-            foreach (long t in scenario.Timestamps)
+            foreach (long t in timestamps)
             {
                 if (t < lastTs)
                 {
@@ -205,6 +222,7 @@ namespace Listen_N
             {
                 engine.ForceStep(lastTs);
             }
+            engine.OnEstimate -= OnEstimate;
             writer.Flush();
         }
     }
