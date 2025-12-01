@@ -145,16 +145,18 @@ namespace Listen_N
                 "is_stats_bound",
                 "insufficient_statistics",
                 "model_mismatch",
+                "max_abs_z",
+                "poisson_quiet_streak",
                 "debug_event_count",
                 "debug_bins_with_counts"
             }));
 
-            using var engine = new AdaptiveWindowEngine(startWorker: false);
             var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
             var stepField = typeof(AdaptiveWindowEngine).GetField("_S", BindingFlags.Instance | BindingFlags.NonPublic);
 
             foreach (var scenario in scenarios)
             {
+                using var engine = new AdaptiveWindowEngine(startWorker: false);
                 RunScenario(scenario, engine, tauField, stepField, writer);
             }
 
@@ -204,6 +206,8 @@ namespace Listen_N
                     est.IsStatsBound.ToString(CultureInfo.InvariantCulture),
                     est.InsufficientStatistics.ToString(CultureInfo.InvariantCulture),
                     est.ModelMismatch.ToString(CultureInfo.InvariantCulture),
+                    est.MaxAbsZ.ToString(CultureInfo.InvariantCulture),
+                    est.PoissonQuietStreak.ToString(CultureInfo.InvariantCulture),
                     engine.DebugEventCount.ToString(CultureInfo.InvariantCulture),
                     engine.DebugBinsWithCounts.ToString(CultureInfo.InvariantCulture)
                 }));
