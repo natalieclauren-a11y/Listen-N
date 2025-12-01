@@ -117,6 +117,7 @@ namespace Listen_N
         private readonly bool _startWorker;
         private volatile bool _running = true;       // loop control flag
         private long _lastTimestampUs = 0;           // last processed detection timestamp
+        private readonly double _initialWindowSec;
 
         private readonly struct MomentCovariance
         {
@@ -181,11 +182,12 @@ namespace Listen_N
         {
             _tgUs = gateLadderUs ?? new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
             _tgIsMilliseconds = _tgUs.Length > 0 && _tgUs[0] < 100;
-            _tgIdx = Math.Min(1, _tgUs.Length - 1);
+            _tgIdx = DefaultGateIndex();
             _wMin = windowMinSec;
             _wMax = windowMaxSec;
-            _W = windowStartSec;
-            _beta = 0.1;
+            _initialWindowSec = windowStartSec;
+            _W = _initialWindowSec;
+            _beta = BetaForState(_fsm);
             _zMin = zMin;
             _zTrack = Math.Max(1.0, zMin);
             _zHold = Math.Max(_zHold, _zTrack + 3.0);
@@ -254,10 +256,38 @@ namespace Listen_N
         // Reset timestamp-related state for a new scenario
         public void ResetTimestampState(long firstTimestampUs)
         {
+            while (_inbound.Reader.TryRead(out _)) { }
+
             _acc.ResetTo(firstTimestampUs);
             _lastTimestampUs = 0;
             _nextStepUs = 0;
+            _fsm = FSM.Warmup;
+            _pendingFsm = FSM.Warmup;
+            _fsmConfirmations = 0;
+            _holdQuietUntilUs = 0;
+
+            _pendingTgIdx = -1;
+            _tgConfirmations = 0;
+            _tgIdx = DefaultGateIndex();
+
+            _W = _initialWindowSec;
+            _S = 0;
+            _beta = BetaForState(_fsm);
+
+            _poissonQuietStreak = 0;
+            _tauHat = double.NaN;
+            _corrResiduals = Array.Empty<double>();
+            _statsBound = false;
+            _insufficientStatistics = false;
+            _modelMismatch = false;
+
+            _cpMean = 0;
+            _cpCum = 0;
+            _cpZyMean = 0;
+            _cpZyCum = 0;
         }
+
+        private int DefaultGateIndex() => Math.Min(1, _tgUs.Length - 1);
 
         private void ProcessSteps(long nowUs, ChannelReader<Detection>? reader = null, bool drainInbound = true)
         {
