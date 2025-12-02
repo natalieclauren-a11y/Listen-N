@@ -863,7 +863,9 @@ namespace Listen_N
             _cpZyMean = 0.99 * _cpZyMean + 0.01 * zy;
             _cpZyCum += zy - _cpZyMean - _cpDelta;
             if (_cpZyCum < 0) _cpZyCum = 0;
-            return _cpZyCum > _cpLambda;
+            bool alarm = _cpZyCum > _cpLambda;
+            if (alarm) _phAlarm = true;
+            return alarm;
         }
 
         private double BetaForState(FSM s) => s == FSM.Track ? 0.5 : 0.1;
