@@ -384,9 +384,10 @@ namespace Listen_N
             for (int k = 0; k < _tgUs.Length; k++)
             {
                 int gateUs = GateWidthUs(k);
+                MomentCovariance rawCov = default;
                 _acc.ComputeMoments(_W, gateUs,
                     out var m1, out var m2, out var m3, out var N,
-                    out var rawCov);
+                    ref rawCov);
 
                 bool covOk = RegularizeCov(rawCov, out var cov);
                 illConditioned |= !covOk;
@@ -1063,7 +1064,7 @@ namespace Listen_N
             }
 
             // Compute factorial moments over gates within current window
-            public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, out MomentCovariance cov)
+            public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, ref MomentCovariance cov)
             {
                 int binsPerGate = Math.Max(1, gateUs / DeltaUs);
                 int gatesInWindow = Math.Max(1, (int)Math.Floor(wSec * 1e6 / gateUs));
@@ -1079,6 +1080,7 @@ namespace Listen_N
                 long s1 = 0, s2 = 0, s3 = 0;
                 double sumN2 = 0, sumF22 = 0, sumF32 = 0;
                 double sumNF2 = 0, sumNF3 = 0, sumF2F3 = 0;
+                var gates = new List<int>(N);
                 int binPtr = (startPhys + binsPerGate) % MaxBins;
 
                 // slide gate across window
@@ -1088,6 +1090,7 @@ namespace Listen_N
                     s1 += nj;
                     s2 += (long)nj * (nj - 1);
                     s3 += (long)nj * (nj - 1) * (nj - 2);
+                    gates.Add(nj);
 
                     double f2 = (double)nj * (nj - 1);
                     double f3 = (double)nj * (nj - 1) * (nj - 2);
@@ -1116,16 +1119,36 @@ namespace Listen_N
                 m2 = s2 * invN;
                 m3 = s3 * invN;
 
-                // sample covariance of gate-level factorial moments
-                double varN = Math.Max(0.0, (sumN2 - N * m1 * m1) / Math.Max(1, N - 1));
-                double varF2 = Math.Max(0.0, (sumF22 - N * m2 * m2) / Math.Max(1, N - 1));
-                double varF3 = Math.Max(0.0, (sumF32 - N * m3 * m3) / Math.Max(1, N - 1));
-                double covNF2 = (sumNF2 - N * m1 * m2) / Math.Max(1, N - 1);
-                double covNF3 = (sumNF3 - N * m1 * m3) / Math.Max(1, N - 1);
-                double covF2F3 = (sumF2F3 - N * m2 * m3) / Math.Max(1, N - 1);
+                int gateCount = gates.Count;
+                if (gateCount >= 2)
+                {
+                    double m1Hat = (double)gates.Sum() / gateCount;
+                    double m2Hat = gates.Select(g => g * (g - 1)).Average();
 
-                cov = new MomentCovariance(varN * invN, varF2 * invN, varF3 * invN,
-                    covNF2 * invN, covNF3 * invN, covF2F3 * invN);
+                    double v11 = 0.0;
+                    double v22 = 0.0;
+                    double v12 = 0.0;
+
+                    for (int i = 0; i < gateCount; i++)
+                    {
+                        double gi = gates[i];
+                        double fi = gi * (gi - 1);
+
+                        v11 += (gi - m1Hat) * (gi - m1Hat);
+                        v22 += (fi - m2Hat) * (fi - m2Hat);
+                        v12 += (gi - m1Hat) * (fi - m2Hat);
+                    }
+
+                    v11 /= (gateCount * (gateCount - 1));
+                    v22 /= (gateCount * (gateCount - 1));
+                    v12 /= (gateCount * (gateCount - 1));
+
+                    cov = new MomentCovariance(v11, v22, 0.0, v12, 0.0, 0.0);
+                }
+                else
+                {
+                    cov = new MomentCovariance();
+                }
             }
 
             public long LeftEdgeUs => _t0Us;
