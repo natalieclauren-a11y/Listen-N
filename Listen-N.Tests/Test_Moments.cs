@@ -107,7 +107,7 @@ namespace AdaptiveWindowTests
                 accumulatorType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 binder: null,
-                args: new object[] { gateUs, windowSec },
+                args: new object[] { gateUs, windowSec, (int?)null },
                 culture: null);
 
             var addMethod = accumulatorType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public);
