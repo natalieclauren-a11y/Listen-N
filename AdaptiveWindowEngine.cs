@@ -444,14 +444,14 @@ namespace Listen_N
                 bool hasSig = sigY > 0 && double.IsFinite(sigY) && y > 0 && (y / sigY) >= _zMin;
                 if (hasSig && significantIdx < 0) significantIdx = k;
 
-                if (hasSig && k > 0 && significantIdx >= 0 && k >= significantIdx)
+                if (hasSig && k > significantIdx)
                 {
                     double dlog = Math.Log((double)GateWidthUs(k) / GateWidthUs(k - 1));
                     if (dlog > 0)
                     {
                         double slope = Math.Abs((Yk[k] - Yk[k - 1]) / dlog);
-                        double eta = _etaFrac * Math.Abs(Yk[k]);
-                        if (slope <= eta)
+                        double thresh = _etaFrac * Math.Abs(Yk[k]);
+                        if (slope < thresh)
                         {
                             plateauIdx = k;
                         }
@@ -475,7 +475,10 @@ namespace Listen_N
             }
             else
             {
-                desiredIdx = plateauIdx >= significantIdx && plateauIdx >= 0 ? plateauIdx : significantIdx;
+                if (plateauIdx >= significantIdx && plateauIdx >= 0)
+                    desiredIdx = plateauIdx;
+                else
+                    desiredIdx = significantIdx;
             }
 
             UpdateGateSelection(desiredIdx);
@@ -573,8 +576,23 @@ namespace Listen_N
             }
 
             _tgConfirmations++;
+            // If engine is in Hold, freeze Tg index
+            if (_fsm == FSM.Hold)
+            {
+                _pendingTgIdx = -1;
+                _tgConfirmations = 0;
+                return;
+            }
             if (_tgConfirmations >= 2)
             {
+                // Only adopt plateau index if sigYk is finite
+                // (use the selected gate's selSigY logic)
+                if (_pendingTgIdx > _tgIdx && _insufficientStatistics)
+                {
+                    _pendingTgIdx = -1;
+                    _tgConfirmations = 0;
+                    return;
+                }
                 _tgIdx = Math.Clamp(desiredIdx, 0, _tgUs.Length - 1);
                 _pendingTgIdx = -1;
                 _tgConfirmations = 0;
@@ -595,6 +613,16 @@ namespace Listen_N
             else if (relY > 2 * _epsY || relM1 > 2 * _epsM1)
             {
                 _W = Math.Min(_W * 1.2, _wMax);
+            }
+
+            // dissertation-required threshold triggers
+            if (relY > _epsY || relM1 > _epsM1)
+            {
+                _W = Math.Min(_W * 1.3, _wMax);
+            }
+            else if (relY < _epsY && relM1 < _epsM1)
+            {
+                _W = Math.Max(_W * 0.95, TauLowerBound());
             }
 
             double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
@@ -757,6 +785,7 @@ namespace Listen_N
 
                 case FSM.Hold:
                     _beta = 0.1;
+                    // freeze window: do not call AdaptWindow in Hold
                     _W = Math.Max(_W, TauLowerBound());
                     if (!needHold && nowUs >= _holdQuietUntilUs) RequestFsmState(FSM.Track, nowUs);
                     break;
@@ -819,7 +848,11 @@ namespace Listen_N
             {
                 case FSM.Hold:
                     _phAlarm = false;
-                    _W = Math.Max(_W, TauLowerBound());
+                    _pendingTgIdx = -1;
+                    // freeze gate width
+                    // (do not allow UpdateGateSelection to change _tgIdx while in Hold)
+                    double tauFloor = TauLowerBound();
+                    _W = Math.Max(_W, tauFloor);
                     _beta = 0.1;
                     _S = _beta * _W;
                     double horizon = Math.Max(5 * _S, 4 * TauLowerBound());
