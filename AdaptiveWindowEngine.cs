@@ -459,6 +459,8 @@ namespace Listen_N
                 }
             }
 
+            if (selN < 2 || selM1 < 1e-6) _insufficientStatistics = true;
+
             // correlation-time fit across ladder
             _tauHat = FitCorrelationTime(Yk, sigYk, out _corrResiduals);
             _modelMismatch = _corrResiduals != null
@@ -484,7 +486,7 @@ namespace Listen_N
             bool correlationChange = RateChangeZy(selSigY > 0 && double.IsFinite(selSigY) ? selY / selSigY : 0);
             bool degraded = illConditioned || (allNonPositiveY && anyValidY);
 
-            _insufficientStatistics = significantIdx < 0 || selSigY <= 0 || double.IsInfinity(selSigY);
+            _insufficientStatistics = _insufficientStatistics || significantIdx < 0 || selSigY <= 0 || double.IsInfinity(selSigY);
 
             AdaptState(nowUs, selY, selSigY, selM1, selV11, selN, hasAnySignificance, singlesChange, correlationChange, degraded, maxAbsZ);
 
@@ -659,6 +661,11 @@ namespace Listen_N
                         RequestFsmState(FSM.Hold, nowUs);
                         break;
                     }
+                    if (_insufficientStatistics)
+                    {
+                        RequestFsmState(FSM.LowRate, nowUs);
+                        break;
+                    }
                     if (degraded)
                     {
                         RequestFsmState(FSM.Degraded, nowUs);
@@ -689,6 +696,11 @@ namespace Listen_N
                     if (degraded)
                     {
                         RequestFsmState(FSM.Degraded, nowUs);
+                        break;
+                    }
+                    if (_insufficientStatistics)
+                    {
+                        RequestFsmState(FSM.LowRate, nowUs);
                         break;
                     }
                     if (needHold)
@@ -851,7 +863,9 @@ namespace Listen_N
             _cpZyMean = 0.99 * _cpZyMean + 0.01 * zy;
             _cpZyCum += zy - _cpZyMean - _cpDelta;
             if (_cpZyCum < 0) _cpZyCum = 0;
-            return _cpZyCum > _cpLambda;
+            bool alarm = _cpZyCum > _cpLambda;
+            if (alarm) _phAlarm = true;
+            return alarm;
         }
 
         private double BetaForState(FSM s) => s == FSM.Track ? 0.5 : 0.1;
