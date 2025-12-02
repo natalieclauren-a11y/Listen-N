@@ -1066,31 +1066,52 @@ namespace Listen_N
             // Compute factorial moments over gates within current window
             public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, ref MomentCovariance cov)
             {
-                int binsPerGate = Math.Max(1, gateUs / DeltaUs);
-                int gatesInWindow = Math.Max(1, (int)Math.Floor(wSec * 1e6 / gateUs));
-                N = Math.Min(gatesInWindow, MaxBins / binsPerGate);
+                // compute how many microseconds per bin
+                double binWidthUs = DeltaUs;
+
+                // determine number of gates in the window
+                double windowUs = wSec * 1e6;
+                int gateCount = (int)Math.Max(1, Math.Floor(windowUs / gateUs));
+                var gates = new List<int>(gateCount);
+
+                // treat bins as time segments and integrate counts according to overlap
+                int nbins = _counts.Length;
+                for (int g = 0; g < gateCount; g++)
+                {
+                    double gateStart = g * gateUs;
+                    double gateEnd = gateStart + gateUs;
+                    double sumGate = 0.0;
+
+                    for (int b = 0; b < nbins; b++)
+                    {
+                        double binStart = b * binWidthUs;
+                        double binEnd = binStart + binWidthUs;
+
+                        // compute fractional overlap of this bin with this gate
+                        double overlap = Math.Min(binEnd, gateEnd) - Math.Max(binStart, gateStart);
+                        if (overlap > 0)
+                        {
+                            double frac = overlap / binWidthUs;
+                            sumGate += frac * _counts[b];
+                        }
+                    }
+
+                    gates.Add((int)Math.Round(sumGate));
+                }
+
+                N = gateCount;
                 if (N <= 0) { m1 = m2 = m3 = 0; cov = new MomentCovariance(); return; }
-
-                int startPhys = _head;
-
-                // initial sum for first gate
-                int sum = 0;
-                for (int b = 0; b < binsPerGate; b++) sum += _counts[(startPhys + b) % MaxBins];
 
                 long s1 = 0, s2 = 0, s3 = 0;
                 double sumN2 = 0, sumF22 = 0, sumF32 = 0;
                 double sumNF2 = 0, sumNF3 = 0, sumF2F3 = 0;
-                var gates = new List<int>(N);
-                int binPtr = (startPhys + binsPerGate) % MaxBins;
 
-                // slide gate across window
                 for (int g = 0; g < N; g++)
                 {
-                    int nj = sum;
+                    int nj = gates[g];
                     s1 += nj;
                     s2 += (long)nj * (nj - 1);
                     s3 += (long)nj * (nj - 1) * (nj - 2);
-                    gates.Add(nj);
 
                     double f2 = (double)nj * (nj - 1);
                     double f3 = (double)nj * (nj - 1) * (nj - 2);
@@ -1101,17 +1122,6 @@ namespace Listen_N
                     sumNF2 += nj * f2;
                     sumNF3 += nj * f3;
                     sumF2F3 += f2 * f3;
-
-                    if (g < N - 1)
-                    {
-                        for (int b = 0; b < binsPerGate; b++)
-                        {
-                            int outIdx = (startPhys + g * binsPerGate + b) % MaxBins;
-                            sum -= _counts[outIdx];
-                            sum += _counts[(binPtr + b) % MaxBins];
-                        }
-                        binPtr = (binPtr + binsPerGate) % MaxBins;
-                    }
                 }
 
                 double invN = 1.0 / N;
@@ -1119,7 +1129,7 @@ namespace Listen_N
                 m2 = s2 * invN;
                 m3 = s3 * invN;
 
-                int gateCount = gates.Count;
+                gateCount = gates.Count;
                 if (gateCount >= 2)
                 {
                     double m1Hat = (double)gates.Sum() / gateCount;
