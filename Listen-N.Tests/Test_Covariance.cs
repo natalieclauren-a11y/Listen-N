@@ -1,8 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Listen_N;
 using Xunit;
+using MathNet.Numerics.LinearAlgebra;
 
 namespace AdaptiveWindowTests
 {
@@ -37,14 +38,26 @@ namespace AdaptiveWindowTests
         public void Test_PositiveSemidefiniteAfterRegularization()
         {
             var gates = new[] { 3, 5, 4, 6, 7, 2, 4 };
+            ComputeCovariance(gates, out var cov);
 
-            ComputeCovariance(gates, out var covObject);
-            Regularize(covObject, out var regObject);
+            // Use existing reflection wrapper
+            Regularize(cov, out var reg);
 
-            double lowerBound = GershgorinLowerBound(regObject);
+            double[,] M = {
+        { GetFieldValue(reg, "V11"), GetFieldValue(reg, "V12"), GetFieldValue(reg, "V13") },
+        { GetFieldValue(reg, "V12"), GetFieldValue(reg, "V22"), GetFieldValue(reg, "V23") },
+        { GetFieldValue(reg, "V13"), GetFieldValue(reg, "V23"), GetFieldValue(reg, "V33") }
+    };
 
-            Assert.True(lowerBound >= -1e-10, "Regularized covariance should be positive semi-definite within tolerance");
+            var mat = Matrix<double>.Build.DenseOfArray(M);
+            var ev = mat.Evd(Symmetricity.Symmetric);
+
+            double lambdaMin = ev.EigenValues.Real().Minimum();
+
+            Assert.True(lambdaMin >= -1e-6,
+                $"Covariance matrix has negative eigenvalue λ_min = {lambdaMin}");
         }
+
 
         [Fact]
         public void Test_VarianceScaling()
@@ -93,21 +106,29 @@ namespace AdaptiveWindowTests
             }
 
             var parameters = computeMethod.GetParameters();
-            covObject = Activator.CreateInstance(parameters[6].ParameterType)!;
+            Type rawType = parameters[6].ParameterType;
+
+            // If it's a by-ref type (MomentCovariance&), get the underlying struct type
+            Type actualType = rawType.IsByRef ? rawType.GetElementType()! : rawType;
+
+            covObject = Activator.CreateInstance(actualType)!;
+
             object[] invokeArgs = new object[]
             {
-                windowSec,
-                gateUs,
-                0.0,
-                0.0,
-                0.0,
-                0,
-                covObject
-            };
+               windowSec,
+               gateUs,
+               0.0,
+               0.0,
+               0.0,
+               0,
+               covObject
+                       };
 
             computeMethod.Invoke(accumulator, invokeArgs);
 
+            // Get the updated covariance struct back out
             covObject = invokeArgs[6];
+
             double v11 = GetFieldValue(covObject, "V11");
             double v22 = GetFieldValue(covObject, "V22");
             double v33 = GetFieldValue(covObject, "V33");

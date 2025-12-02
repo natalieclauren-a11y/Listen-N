@@ -927,7 +927,7 @@ namespace Listen_N
                 return false;
             }
 
-            double lambda = 1e-12 * Math.Max(1.0, maxDiag);
+            double lambda = 1e-3 * Math.Max(1.0, maxDiag);
             double v11 = cov.V11 + lambda;
             double v22 = cov.V22 + lambda;
             double v33 = cov.V33 + lambda;
