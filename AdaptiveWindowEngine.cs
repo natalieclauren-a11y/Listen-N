@@ -398,7 +398,14 @@ namespace Listen_N
                 if (N > 1 && covOk)
                 {
                     double varY = MomentsMath.VarY(m1, m2, cov.V11, cov.V22, cov.V12);
-                    sigY = double.IsFinite(varY) && varY > 0 ? Math.Sqrt(varY) : double.PositiveInfinity;
+                    if (double.IsFinite(varY) && varY > 0)
+                    {
+                        sigY = Math.Sqrt(varY);
+                    }
+                    else
+                    {
+                        sigY = double.PositiveInfinity;
+                    }
                 }
 
                 sigYk[k] = sigY;
