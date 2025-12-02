@@ -764,6 +764,11 @@ namespace Listen_N
                     break;
 
                 case FSM.Degraded:
+                    if (_phAlarm)
+                    {
+                        // Keep Degraded stable but clear the alarm so it doesn't cascade.
+                        _phAlarm = false;
+                    }
                     _beta = 0.1;
                     _tgIdx = 0;
                     _W = Math.Min(_W * 1.1, _wMax);
