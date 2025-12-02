@@ -586,6 +586,15 @@ namespace Listen_N
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
 
+            if (relY < 0.5 * _epsY && relM1 < 0.5 * _epsM1)
+            {
+                _W = Math.Max(_W * 0.9, TauLowerBound());
+            }
+            else if (relY > 2 * _epsY || relM1 > 2 * _epsM1)
+            {
+                _W = Math.Min(_W * 1.2, _wMax);
+            }
+
             double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
             if (double.IsFinite(scale) && scale > 0)
             {
