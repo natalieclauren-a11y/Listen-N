@@ -643,6 +643,11 @@ namespace Listen_N
 
                 case FSM.Poisson:
                     _beta = BetaForState(_fsm);
+                    if (_phAlarm)
+                    {
+                        RequestFsmState(FSM.Hold, nowUs);
+                        break;
+                    }
                     if (degraded)
                     {
                         RequestFsmState(FSM.Degraded, nowUs);
@@ -665,6 +670,11 @@ namespace Listen_N
 
                 case FSM.Track:
                     _beta = BetaForState(_fsm);
+                    if (_phAlarm)
+                    {
+                        RequestFsmState(FSM.Hold, nowUs);
+                        break;
+                    }
                     if (degraded)
                     {
                         RequestFsmState(FSM.Degraded, nowUs);
@@ -759,6 +769,7 @@ namespace Listen_N
             switch (target)
             {
                 case FSM.Hold:
+                    _phAlarm = false;
                     _W = Math.Max(_W, TauLowerBound());
                     _beta = 0.1;
                     _S = _beta * _W;
