@@ -444,14 +444,14 @@ namespace Listen_N
                 bool hasSig = sigY > 0 && double.IsFinite(sigY) && y > 0 && (y / sigY) >= _zMin;
                 if (hasSig && significantIdx < 0) significantIdx = k;
 
-                if (hasSig && k > 0 && significantIdx >= 0 && k >= significantIdx)
+                if (hasSig && k > significantIdx)
                 {
                     double dlog = Math.Log((double)GateWidthUs(k) / GateWidthUs(k - 1));
                     if (dlog > 0)
                     {
                         double slope = Math.Abs((Yk[k] - Yk[k - 1]) / dlog);
-                        double eta = _etaFrac * Math.Abs(Yk[k]);
-                        if (slope <= eta)
+                        double thresh = _etaFrac * Math.Abs(Yk[k]);
+                        if (slope < thresh)
                         {
                             plateauIdx = k;
                         }
@@ -475,7 +475,10 @@ namespace Listen_N
             }
             else
             {
-                desiredIdx = plateauIdx >= significantIdx && plateauIdx >= 0 ? plateauIdx : significantIdx;
+                if (plateauIdx >= significantIdx && plateauIdx >= 0)
+                    desiredIdx = plateauIdx;
+                else
+                    desiredIdx = significantIdx;
             }
 
             UpdateGateSelection(desiredIdx);
@@ -595,6 +598,16 @@ namespace Listen_N
             else if (relY > 2 * _epsY || relM1 > 2 * _epsM1)
             {
                 _W = Math.Min(_W * 1.2, _wMax);
+            }
+
+            // dissertation-required threshold triggers
+            if (relY > _epsY || relM1 > _epsM1)
+            {
+                _W = Math.Min(_W * 1.3, _wMax);
+            }
+            else if (relY < _epsY && relM1 < _epsM1)
+            {
+                _W = Math.Max(_W * 0.95, TauLowerBound());
             }
 
             double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
