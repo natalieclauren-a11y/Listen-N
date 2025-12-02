@@ -1124,16 +1124,8 @@ namespace Listen_N
                 double covNF3 = (sumNF3 - N * m1 * m3) / Math.Max(1, N - 1);
                 double covF2F3 = (sumF2F3 - N * m2 * m3) / Math.Max(1, N - 1);
 
-               
-
-                cov = new MomentCovariance(
-                    varN * invN,
-                    varF2 * invN,
-                    varF3 * invN,
-                    covNF2 * invN,
-                    covNF3 * invN,
-                    covF2F3 * invN);
-
+                cov = new MomentCovariance(varN * invN, varF2 * invN, varF3 * invN,
+                    covNF2 * invN, covNF3 * invN, covF2F3 * invN);
             }
 
             public long LeftEdgeUs => _t0Us;
