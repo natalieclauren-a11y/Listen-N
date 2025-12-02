@@ -45,6 +45,12 @@ namespace Listen_N
             public double M1 { get; init; }        // first factorial moment
             public double M2 { get; init; }        // second factorial moment
             public double M3 { get; init; }        // third factorial moment
+            public double VarM1 { get; init; }     // variance of m1_hat
+            public double VarM2 { get; init; }     // variance of m2_hat
+            public double VarM3 { get; init; }     // variance of m3_hat
+            public double CovM1M2 { get; init; }   // covariance of m1_hat and m2_hat
+            public double CovM1M3 { get; init; }   // covariance of m1_hat and m3_hat
+            public double CovM2M3 { get; init; }   // covariance of m2_hat and m3_hat
             public double Y { get; init; }         // Feynman-Y statistic
             public double SigmaY { get; init; }    // uncertainty of Y
             public double ZY { get; init; }        // Z-score of Y (Y / σY)
@@ -368,7 +374,7 @@ namespace Listen_N
             double maxAbsZ = 0;
 
             // covariance entries for selected gate
-            double selV11 = 0, selV22 = 0, selV12 = 0;
+            double selV11 = 0, selV22 = 0, selV33 = 0, selV12 = 0, selV13 = 0, selV23 = 0;
             bool illConditioned = false;
             bool anyValidY = false;
             bool allNonPositiveY = true;
@@ -421,7 +427,10 @@ namespace Listen_N
                     selSigY = sigY;
                     selV11 = cov.V11;
                     selV22 = cov.V22;
+                    selV33 = cov.V33;
                     selV12 = cov.V12;
+                    selV13 = cov.V13;
+                    selV23 = cov.V23;
                 }
 
                 bool hasSig = sigY > 0 && double.IsFinite(sigY) && y > 0 && (y / sigY) >= _zMin;
@@ -478,6 +487,12 @@ namespace Listen_N
                 M1 = selM1,
                 M2 = selM2,
                 M3 = selM3,
+                VarM1 = selV11,
+                VarM2 = selV22,
+                VarM3 = selV33,
+                CovM1M2 = selV12,
+                CovM1M3 = selV13,
+                CovM2M3 = selV23,
                 Y = selY,
                 SigmaY = selSigY,
                 ZY = selSigY > 0 && double.IsFinite(selSigY) ? selY / selSigY : 0,
