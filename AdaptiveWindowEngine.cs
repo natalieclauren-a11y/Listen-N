@@ -600,6 +600,16 @@ namespace Listen_N
                 _W = Math.Min(_W * 1.2, _wMax);
             }
 
+            // dissertation-required threshold triggers
+            if (relY > _epsY || relM1 > _epsM1)
+            {
+                _W = Math.Min(_W * 1.3, _wMax);
+            }
+            else if (relY < _epsY && relM1 < _epsM1)
+            {
+                _W = Math.Max(_W * 0.95, TauLowerBound());
+            }
+
             double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
             if (double.IsFinite(scale) && scale > 0)
             {
