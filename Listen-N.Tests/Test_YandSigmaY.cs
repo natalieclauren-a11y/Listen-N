@@ -9,12 +9,7 @@ namespace AdaptiveWindowTests
     public class Test_YandSigmaY
     {
         //
-        // ────────────────────────────────────────────────
-        //  PURE MATH TEST: deterministic low-variance data
-        // ────────────────────────────────────────────────
-        //
-        // For constant data, m1 = g and m2 = g(g-1), so:
-        //     Y = (m2 - m1^2) / m1 = -1
+        // PURE MATH TEST — deterministic low-variance data
         //
 
         [Fact]
@@ -28,15 +23,13 @@ namespace AdaptiveWindowTests
             double y = ComputeDirectY(m1, m2);
 
             Assert.True(double.IsFinite(y), "Y must be finite");
-            Assert.True(y < 0, $"Y should be negative for constant gates, got {y}");
+            Assert.True(y < 0, $"Expected Y < 0 for constant gates, got {y}");
             Assert.True(Math.Abs(y + 1.0) < 1e-6, $"Expected Y ≈ -1, got {y}");
         }
 
 
         //
-        // ────────────────────────────────────────────────
-        //  ENGINE TEST: Y > 0 for clustered data
-        // ────────────────────────────────────────────────
+        // ENGINE TEST — Y positive for clustered data
         //
 
         [Fact]
@@ -47,18 +40,12 @@ namespace AdaptiveWindowTests
             var (y, _) = ComputeYAndSigmaY(gates);
 
             Assert.True(double.IsFinite(y), "Y must be finite");
-            Assert.True(y > 0, $"Expected Y > 0 for clustered (super-Poisson) data, got {y}");
+            Assert.True(y > 0, $"Expected Y > 0 for clustered distribution, got {y}");
         }
 
 
         //
-        // ────────────────────────────────────────────────
-        //  ENGINE TEST: sigmaY finite & non-negative
-        // ────────────────────────────────────────────────
-        //
-        // For m1 < ~3, sigmaY is undefined by physics due
-        // to instability of the partial derivatives.
-        // Skip those cases.
+        // ENGINE TEST — sigmaY finite & non-negative
         //
 
         [Fact]
@@ -66,32 +53,30 @@ namespace AdaptiveWindowTests
         {
             var patterns = new List<int[]>
             {
-                new[] { 2, 0, 1, 3 },
-                new[] { 5, 10, 0, 2 },
-                new[] { 0, 0, 0, 0 },
-                new[] { 1, 2, 3, 4, 5 }
+                new[]{ 2, 0, 1, 3 },
+                new[]{ 5, 10, 0, 2 },
+                new[]{ 0, 0, 0, 0 },
+                new[]{ 1, 2, 3, 4, 5 }
             };
 
-            foreach (var pattern in patterns)
+            foreach (var p in patterns)
             {
-                var (y, sigmaY) = ComputeYAndSigmaY(pattern);
-                double m1 = pattern.Average();
+                var (y, sigmaY) = ComputeYAndSigmaY(p);
+                double m1 = p.Average();
 
-                // sigmaY undefined below this count level
+                // avoid mathematically undefined region
                 if (m1 < 3)
                     continue;
 
-                Assert.True(double.IsFinite(y), $"Y should be finite (m1={m1})");
-                Assert.True(double.IsFinite(sigmaY), $"sigmaY should be finite (m1={m1})");
-                Assert.True(sigmaY >= 0, $"sigmaY should be non-negative, got {sigmaY}");
+                Assert.True(double.IsFinite(y), $"Y must be finite (m1={m1})");
+                Assert.True(double.IsFinite(sigmaY), $"sigmaY must be finite (m1={m1})");
+                Assert.True(sigmaY >= 0, $"sigmaY must be >= 0, got {sigmaY}");
             }
         }
 
 
         //
-        // ────────────────────────────────────────────────
-        //  ENGINE TEST: Y increases with variance
-        // ────────────────────────────────────────────────
+        // ENGINE TEST — Y increases with variance
         //
 
         [Fact]
@@ -110,14 +95,11 @@ namespace AdaptiveWindowTests
 
 
         //
-        // ────────────────────────────────────────────────
-        //  ENGINE MOMENTS & SIGMA-Y through accumulator
-        // ────────────────────────────────────────────────
+        // CORE ENGINE-INVOKING HELPER
         //
 
         private static (double y, double sigmaY) ComputeYAndSigmaY(IReadOnlyList<int> gates, int gateUs = 1)
         {
-            // Window duration in seconds
             double windowSec = Math.Max(1, gates.Count) * gateUs / 1e6;
 
             var engineType = typeof(Listen_N.AdaptiveWindowEngine);
@@ -131,35 +113,35 @@ namespace AdaptiveWindowTests
                 culture: null
             )!;
 
-            var addMethod = accType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
-            var computeMethod = accType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+            var add = accType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+            var compute = accType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
 
             long t = 0;
             for (int i = 0; i < gates.Count; i++)
             {
                 for (int j = 0; j < gates[i]; j++)
-                    addMethod.Invoke(acc, new object[] { t });
+                    add.Invoke(acc, new object[] { t });
 
-                t += gateUs; // advance to next gate
+                t += gateUs;
             }
 
-            // Allocate covariance struct
-            var parameters = computeMethod.GetParameters();
+            // cov struct
+            var parameters = compute.GetParameters();
             Type covType = parameters[6].ParameterType.GetElementType()!;
             object cov = Activator.CreateInstance(covType)!;
 
-            object[] computeArgs =
+            object[] argsCompute =
             {
                 windowSec, gateUs,
                 0.0, 0.0, 0.0,
-                0,   // N
+                0,
                 cov
             };
 
-            computeMethod.Invoke(acc, computeArgs);
+            compute.Invoke(acc, argsCompute);
 
-            double m1 = (double)computeArgs[2];
-            double m2 = (double)computeArgs[3];
+            double m1 = (double)argsCompute[2];
+            double m2 = (double)argsCompute[3];
 
             double v11 = GetField(cov, "V11");
             double v22 = GetField(cov, "V22");
@@ -177,9 +159,7 @@ namespace AdaptiveWindowTests
 
 
         //
-        // ────────────────────────────────────────────────
-        //  Reflection utilities
-        // ────────────────────────────────────────────────
+        // REFLECTION HELPERS
         //
 
         private static double GetField(object cov, string name)
@@ -189,24 +169,22 @@ namespace AdaptiveWindowTests
             return (double)f.GetValue(cov)!;
         }
 
-
         private static double ComputeDirectY(double m1, double m2)
         {
             var mathType = typeof(Listen_N.AdaptiveWindowEngine)
                 .GetNestedType("MomentsMath", BindingFlags.NonPublic)!;
 
-            var yMethod = mathType.GetMethod("Y", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!;
-            return (double)yMethod.Invoke(null, new object[] { m1, m2 })!;
+            var method = mathType.GetMethod("Y", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+            return (double)method.Invoke(null, new object[] { m1, m2 })!;
         }
-
 
         private static double ComputeVarY(double m1, double m2, double v11, double v22, double v12)
         {
             var mathType = typeof(Listen_N.AdaptiveWindowEngine)
                 .GetNestedType("MomentsMath", BindingFlags.NonPublic)!;
 
-            var varYMethod = mathType.GetMethod("VarY", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!;
-            return (double)varYMethod.Invoke(null, new object[] { m1, m2, v11, v22, v12 })!;
+            var method = mathType.GetMethod("VarY", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+            return (double)method.Invoke(null, new object[] { m1, m2, v11, v22, v12 })!;
         }
     }
 }
