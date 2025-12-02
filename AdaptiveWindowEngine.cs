@@ -1139,9 +1139,9 @@ namespace Listen_N
                         v12 += (gi - m1Hat) * (fi - m2Hat);
                     }
 
-                    v11 /= (gateCount * (gateCount - 1));
-                    v22 /= (gateCount * (gateCount - 1));
-                    v12 /= (gateCount * (gateCount - 1));
+                    v11 /= (gateCount - 1);
+                    v22 /= (gateCount - 1);
+                    v12 /= (gateCount - 1);
 
                     cov = new MomentCovariance(v11, v22, 0.0, v12, 0.0, 0.0);
                 }
