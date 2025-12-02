@@ -620,6 +620,11 @@ namespace Listen_N
             switch (_fsm)
             {
                 case FSM.Warmup:
+                    if (_phAlarm)
+                    {
+                        RequestFsmState(FSM.Hold, nowUs);
+                        break;
+                    }
                     _beta = BetaForState(_fsm);
                     bool windowFilled = (nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6);
                     bool enoughGates = gatesUsed >= 2;
@@ -759,6 +764,11 @@ namespace Listen_N
                     break;
 
                 case FSM.Degraded:
+                    if (_phAlarm)
+                    {
+                        // Keep Degraded stable but clear the alarm so it doesn't cascade.
+                        _phAlarm = false;
+                    }
                     _beta = 0.1;
                     _tgIdx = 0;
                     _W = Math.Min(_W * 1.1, _wMax);
