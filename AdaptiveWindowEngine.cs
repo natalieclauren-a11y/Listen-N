@@ -576,8 +576,23 @@ namespace Listen_N
             }
 
             _tgConfirmations++;
+            // If engine is in Hold, freeze Tg index
+            if (_fsm == FSM.Hold)
+            {
+                _pendingTgIdx = -1;
+                _tgConfirmations = 0;
+                return;
+            }
             if (_tgConfirmations >= 2)
             {
+                // Only adopt plateau index if sigYk is finite
+                // (use the selected gate's selSigY logic)
+                if (_pendingTgIdx > _tgIdx && _insufficientStatistics)
+                {
+                    _pendingTgIdx = -1;
+                    _tgConfirmations = 0;
+                    return;
+                }
                 _tgIdx = Math.Clamp(desiredIdx, 0, _tgUs.Length - 1);
                 _pendingTgIdx = -1;
                 _tgConfirmations = 0;
