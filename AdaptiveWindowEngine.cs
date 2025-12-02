@@ -625,6 +625,11 @@ namespace Listen_N
                         RequestFsmState(FSM.Hold, nowUs);
                         break;
                     }
+                    if (_insufficientStatistics)
+                    {
+                        RequestFsmState(FSM.LowRate, nowUs);
+                        break;
+                    }
                     _beta = BetaForState(_fsm);
                     bool windowFilled = (nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6);
                     bool enoughGates = gatesUsed >= 2;
