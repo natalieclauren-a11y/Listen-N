@@ -770,6 +770,7 @@ namespace Listen_N
 
                 case FSM.Hold:
                     _beta = 0.1;
+                    // freeze window: do not call AdaptWindow in Hold
                     _W = Math.Max(_W, TauLowerBound());
                     if (!needHold && nowUs >= _holdQuietUntilUs) RequestFsmState(FSM.Track, nowUs);
                     break;
@@ -832,7 +833,11 @@ namespace Listen_N
             {
                 case FSM.Hold:
                     _phAlarm = false;
-                    _W = Math.Max(_W, TauLowerBound());
+                    _pendingTgIdx = -1;
+                    // freeze gate width
+                    // (do not allow UpdateGateSelection to change _tgIdx while in Hold)
+                    double tauFloor = TauLowerBound();
+                    _W = Math.Max(_W, tauFloor);
                     _beta = 0.1;
                     _S = _beta * _W;
                     double horizon = Math.Max(5 * _S, 4 * TauLowerBound());
