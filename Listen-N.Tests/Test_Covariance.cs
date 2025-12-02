@@ -86,7 +86,7 @@ namespace AdaptiveWindowTests
                 accumulatorType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 binder: null,
-                args: new object[] { gateUs, windowSec },
+                args: new object[] { gateUs, windowSec, (int?)null },
                 culture: null);
             if (accumulator == null)
                 throw new InvalidOperationException("Failed to instantiate BaseBinAccumulator.");

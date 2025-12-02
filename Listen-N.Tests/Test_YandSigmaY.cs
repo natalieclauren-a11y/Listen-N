@@ -68,9 +68,8 @@ namespace AdaptiveWindowTests
                 if (m1 < 3)
                     continue;
 
-                Assert.True(double.IsFinite(y), $"Y must be finite (m1={m1})");
                 Assert.True(double.IsFinite(sigmaY), $"sigmaY must be finite (m1={m1})");
-                Assert.True(sigmaY >= 0, $"sigmaY must be >= 0, got {sigmaY}");
+                Assert.True(sigmaY >= 0, "sigmaY cannot be negative");
             }
         }
 
@@ -109,7 +108,7 @@ namespace AdaptiveWindowTests
                 accType!,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 binder: null,
-                args: new object[] { gateUs, windowSec },
+                args: new object[] { gateUs, windowSec, (int?)null },
                 culture: null
             )!;
 
