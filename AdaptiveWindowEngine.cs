@@ -186,7 +186,7 @@ namespace Listen_N
 
         public AdaptiveWindowEngine(
             int baseDeltaUs = 50,
-            double windowStartSec = 2.0,
+            double windowStartSec = 0.5,
             double windowMinSec = 0.5,
             double windowMaxSec = 60.0,
             int[]? gateLadderUs = null,
