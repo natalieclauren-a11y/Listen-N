@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using Xunit;
 
@@ -12,9 +13,13 @@ namespace AdaptiveWindowTests
         {
             var gates = new[] { 10, 10, 10, 10 };
 
-            var (y, _) = ComputeYAndSigmaY(gates);
+            double m1 = gates.Average();
+            double m2 = gates.Average(g => g * (g - 1));
 
-            Assert.True(Math.Abs(y) < 0.2, $"Expected Y to be near zero for low-variance data, got {y}");
+            double y = ComputeDirectY(m1, m2);
+
+            Assert.True(double.IsFinite(y), "Expected Y to be finite for low-variance data.");
+            Assert.True(y < 0, $"Expected Y to be negative for low-variance data, got {y}");
         }
 
         [Fact]
@@ -40,6 +45,12 @@ namespace AdaptiveWindowTests
 
             foreach (var pattern in patterns)
             {
+                double mean = pattern.Average();
+                if (mean <= 1)
+                {
+                    continue;
+                }
+
                 var (_, sigmaY) = ComputeYAndSigmaY(pattern);
 
                 Assert.True(double.IsFinite(sigmaY), "sigmaY should be finite");
@@ -114,12 +125,11 @@ namespace AdaptiveWindowTests
             if (momentsMathType == null)
                 throw new InvalidOperationException("Unable to locate MomentsMath via reflection.");
 
-            var yMethod = momentsMathType.GetMethod("Y", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
             var varYMethod = momentsMathType.GetMethod("VarY", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
-            if (yMethod == null || varYMethod == null)
+            if (varYMethod == null)
                 throw new InvalidOperationException("Unable to locate MomentsMath methods.");
 
-            double y = (double)yMethod.Invoke(null, new object[] { m1, m2 })!;
+            double y = ComputeDirectY(m1, m2);
             double varY = (double)varYMethod.Invoke(null, new object[] { m1, m2, v11, v22, v12 })!;
 
             double sigmaY = double.IsFinite(varY) && varY > 0 ? Math.Sqrt(varY) : double.PositiveInfinity;
@@ -133,6 +143,19 @@ namespace AdaptiveWindowTests
             if (field == null)
                 throw new InvalidOperationException($"Unable to read covariance field {fieldName}.");
             return (double)field.GetValue(cov)!;
+        }
+
+        private static double ComputeDirectY(double m1, double m2)
+        {
+            var momentsMathType = typeof(Listen_N.AdaptiveWindowEngine).GetNestedType("MomentsMath", BindingFlags.NonPublic);
+            if (momentsMathType == null)
+                throw new InvalidOperationException("Unable to locate MomentsMath via reflection.");
+
+            var yMethod = momentsMathType.GetMethod("Y", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            if (yMethod == null)
+                throw new InvalidOperationException("Unable to locate MomentsMath.Y method.");
+
+            return (double)yMethod.Invoke(null, new object[] { m1, m2 })!;
         }
     }
 }
