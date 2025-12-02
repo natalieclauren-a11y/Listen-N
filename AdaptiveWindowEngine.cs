@@ -182,6 +182,7 @@ namespace Listen_N
         // Page–Hinkley change-point detection variables
         private double _cpMean, _cpCum;
         private readonly double _cpDelta = 5e-3, _cpLambda = 50.0;
+        private bool _phAlarm;
         private double _cpZyMean, _cpZyCum;
 
         public AdaptiveWindowEngine(
@@ -804,16 +805,16 @@ namespace Listen_N
         // Page–Hinkley style change detection
         private bool RateChange(double x)
         {
-            if (_cpMean == 0) _cpMean = x;
             _cpMean = 0.99 * _cpMean + 0.01 * x;
             _cpCum += x - _cpMean - _cpDelta;
             if (_cpCum < 0) _cpCum = 0;
-            return _cpCum > _cpLambda;
+            bool alarm = _cpCum > _cpLambda;
+            if (alarm) _phAlarm = true;
+            return alarm;
         }
 
         private bool RateChangeZy(double zy)
         {
-            if (_cpZyMean == 0) _cpZyMean = zy;
             _cpZyMean = 0.99 * _cpZyMean + 0.01 * zy;
             _cpZyCum += zy - _cpZyMean - _cpDelta;
             if (_cpZyCum < 0) _cpZyCum = 0;
