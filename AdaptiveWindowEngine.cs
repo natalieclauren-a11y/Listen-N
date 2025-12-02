@@ -1078,13 +1078,13 @@ namespace Listen_N
                 int nbins = _counts.Length;
                 for (int g = 0; g < gateCount; g++)
                 {
-                    double gateStart = g * gateUs;
+                    double gateStart = _t0Us + g * gateUs;
                     double gateEnd = gateStart + gateUs;
                     double sumGate = 0.0;
 
                     for (int b = 0; b < nbins; b++)
                     {
-                        double binStart = b * binWidthUs;
+                        double binStart = _t0Us + b * binWidthUs;
                         double binEnd = binStart + binWidthUs;
 
                         // compute fractional overlap of this bin with this gate
