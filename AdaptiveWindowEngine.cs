@@ -460,7 +460,9 @@ namespace Listen_N
 
             // correlation-time fit across ladder
             _tauHat = FitCorrelationTime(Yk, sigYk, out _corrResiduals);
-            _modelMismatch = _corrResiduals.Length > 0 && Rms(_corrResiduals) > (_epsY * 2.0);
+            _modelMismatch = _corrResiduals != null
+                             && _corrResiduals.Length > 0
+                             && Rms(_corrResiduals) > (_epsY * 2.0);
 
             int desiredIdx = _tgIdx;
             if (significantIdx < 0)
