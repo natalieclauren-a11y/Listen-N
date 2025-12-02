@@ -603,6 +603,7 @@ namespace Listen_N
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
             double relMax = Math.Max(relY, relM1);
+            double zy = sigY > 0 && double.IsFinite(sigY) ? Y / sigY : 0;
             bool needHold = singlesChange || correlationChange;
 
             switch (_fsm)
@@ -628,7 +629,8 @@ namespace Listen_N
 
                     if (windowFilled && enoughGates && positiveM1 && maxAbsZ < _zPoisson)
                     {
-                        _poissonQuietStreak++;
+                        if (Math.Abs(zy) < _zPoisson) _poissonQuietStreak++;
+                        else _poissonQuietStreak = 0;
                         if (_poissonQuietStreak >= _poissonQuietRequired) RequestFsmState(FSM.Poisson, nowUs);
                     }
                     else if (windowFilled)
@@ -696,6 +698,17 @@ namespace Listen_N
                     else
                     {
                         AdaptWindow(Y, sigY, m1, varM1, false);
+                    }
+
+                    if (maxAbsZ < _zPoisson)
+                    {
+                        if (Math.Abs(zy) < _zPoisson) _poissonQuietStreak++;
+                        else _poissonQuietStreak = 0;
+                        if (_poissonQuietStreak >= _poissonQuietRequired) RequestFsmState(FSM.Poisson, nowUs);
+                    }
+                    else
+                    {
+                        _poissonQuietStreak = 0;
                     }
                     break;
 
