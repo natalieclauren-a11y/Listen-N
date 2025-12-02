@@ -89,29 +89,31 @@ namespace AdaptiveWindowTests
             }
         }
 
-        private static (double m1, double m2, double m3, int N) ComputeMomentsFromGates(IReadOnlyList<int> gates, int gateUs = 1)
+        private static (double m1, double m2, double m3, int N)
+    ComputeMomentsFromGates(IReadOnlyList<int> gates, int gateUs = 1)
         {
-            if (gates == null) throw new ArgumentNullException(nameof(gates));
+            if (gates == null)
+                throw new ArgumentNullException(nameof(gates));
 
             double windowSec = Math.Max(1, gates.Count) * gateUs / 1e6;
-            var accumulatorType = typeof(AdaptiveWindowEngine).GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic);
+
+            var accumulatorType = typeof(AdaptiveWindowEngine)
+                .GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic);
+
             if (accumulatorType == null)
                 throw new InvalidOperationException("Unable to locate BaseBinAccumulator via reflection.");
 
-            object? accumulator = Activator.CreateInstance(
+            var accumulator = Activator.CreateInstance(
                 accumulatorType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 binder: null,
                 args: new object[] { gateUs, windowSec },
                 culture: null);
-            if (accumulator == null)
-                throw new InvalidOperationException("Failed to instantiate BaseBinAccumulator.");
 
             var addMethod = accumulatorType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public);
             var computeMethod = accumulatorType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public);
-            if (addMethod == null || computeMethod == null)
-                throw new InvalidOperationException("Missing expected BaseBinAccumulator methods.");
 
+            // Feed synthetic gates
             for (int i = 0; i < gates.Count; i++)
             {
                 long tUs = (long)(i * gateUs);
@@ -121,26 +123,43 @@ namespace AdaptiveWindowTests
                 }
             }
 
-            var parameters = computeMethod.GetParameters();
-            object[] invokeArgs = new object[]
-            {
-                windowSec,
-                gateUs,
-                0.0,
-                0.0,
-                0.0,
-                0,
-                Activator.CreateInstance(parameters[6].ParameterType)!
-            };
+            // Prepare real locals for out parameters
+            double m1 = 0, m2 = 0, m3 = 0;
+            int N = 0;
 
+            // Get the underlying type of the by-ref covariance parameter
+            var covParamType = computeMethod.GetParameters()[6].ParameterType;
+            var covUnderlyingType = covParamType.IsByRef
+                ? covParamType.GetElementType()
+                : covParamType;
+
+            // Instantiate the actual struct (NOT the by-ref type)
+            var cov = Activator.CreateInstance(covUnderlyingType);
+
+            // Prepare invocation args
+            object[] invokeArgs =
+            {
+        windowSec,
+        gateUs,
+        m1,
+        m2,
+        m3,
+        N,
+        cov
+    };
+
+            // Call ComputeMoments via reflection
             computeMethod.Invoke(accumulator, invokeArgs);
 
-            double m1 = (double)invokeArgs[2];
-            double m2 = (double)invokeArgs[3];
-            double m3 = (double)invokeArgs[4];
-            int N = (int)invokeArgs[5];
-            return (m1, m2, m3, N);
+            // Extract updated values
+            double out_m1 = (double)invokeArgs[2];
+            double out_m2 = (double)invokeArgs[3];
+            double out_m3 = (double)invokeArgs[4];
+            int out_N = (int)invokeArgs[5];
+
+            return (out_m1, out_m2, out_m3, out_N);
         }
+
 
         private static IReadOnlyList<int> GeneratePoissonSamples(int count, double lambda, int seed)
         {
