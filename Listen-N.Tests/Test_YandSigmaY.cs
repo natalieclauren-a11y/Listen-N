@@ -48,9 +48,8 @@ namespace AdaptiveWindowTests
 
         private static AdaptiveWindowEngine.Estimate GenerateEstimate(IReadOnlyList<int> gateCounts)
         {
-            const int gateUs = 200;
-            double rawWindowSec = gateCounts.Count * gateUs / 1e6;
-            double windowSec = Math.Max(1e-3, rawWindowSec);
+            const int gateUs = 500;
+            double windowSec = gateCounts.Count * gateUs / 1e6;
             int deltaUs = Math.Max(1, gateUs / 10);
 
             using var engine = new AdaptiveWindowEngine(
@@ -78,6 +77,10 @@ namespace AdaptiveWindowTests
 
             long finalTs = timestamps[^1] + gateUs;
             engine.ForceStep(finalTs);
+
+            // Nudge time forward by one more window to guarantee at least one adaptive step
+            long extraTs = finalTs + (long)(windowSec * 1e6);
+            engine.ForceStep(extraTs);
 
             engine.OnEstimate -= OnEstimate;
 
