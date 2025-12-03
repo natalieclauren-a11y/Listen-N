@@ -17,6 +17,7 @@
 namespace Listen_N
 {
     using System;
+    using System.Linq;
     using System.Threading;
     using System.Threading.Channels;
 
@@ -936,67 +937,140 @@ namespace Listen_N
             return ok;
         }
 
+        private static double Median(System.Collections.Generic.IEnumerable<double> values)
+        {
+            var arr = values.Where(double.IsFinite).OrderBy(v => v).ToArray();
+            if (arr.Length == 0) return double.NaN;
+            int mid = arr.Length / 2;
+            return (arr.Length % 2 == 1) ? arr[mid] : 0.5 * (arr[mid - 1] + arr[mid]);
+        }
+
         private double FitCorrelationTime(double[] Y, double[] sigY, out double[] residuals)
         {
             int n = Math.Min(Y.Length, sigY.Length);
-            double minT = double.MaxValue, maxT = 0;
-            double wSum = 0, ySum = 0;
+            var samples = new System.Collections.Generic.List<(double t, double y, double sig, bool hasSig)>();
+
             for (int i = 0; i < n; i++)
             {
-                if (sigY[i] > 0 && double.IsFinite(sigY[i]) && double.IsFinite(Y[i]))
-                {
-                    double w = 1.0 / (sigY[i] * sigY[i]);
-                    wSum += w;
-                    ySum += w * Y[i];
-                    double t = GateWidthUs(i) / 1e6;
-                    minT = Math.Min(minT, t);
-                    maxT = Math.Max(maxT, t);
-                }
+                if (i >= _tgUs.Length) break; // guard against ladder mismatch
+                double t = GateWidthUs(i) / 1e6;
+                double y = Y[i];
+                double s = sigY[i];
+                if (t <= 0 || !double.IsFinite(t) || !double.IsFinite(y) || y <= 0) continue;
+                bool hasSig = s > 0 && double.IsFinite(s);
+                samples.Add((t, y, hasSig ? s : 1.0, hasSig));
             }
 
-            if (wSum <= 0 || !double.IsFinite(minT) || minT <= 0)
+            if (samples.Count < 2)
             {
-                residuals = Array.Empty<double>();
+                residuals = new[] { double.PositiveInfinity };
                 return double.NaN;
             }
 
-            double yInf = ySum / wSum;
+            // Reject obvious outliers using a MAD filter
+            double median = Median(samples.Select(s => s.y));
+            double mad = Median(samples.Select(s => Math.Abs(s.y - median)));
+            double madThresh = mad > 0 ? 6.0 * mad : 0.25 * Math.Max(1e-6, median);
+            samples = samples.Where(s => Math.Abs(s.y - median) <= madThresh).ToList();
+            if (samples.Count < 2)
+            {
+                residuals = new[] { double.PositiveInfinity };
+                return double.NaN;
+            }
+
+            double yMin = double.MaxValue, yMax = double.MinValue, yMean = 0;
+            foreach (var s in samples)
+            {
+                yMin = Math.Min(yMin, s.y);
+                yMax = Math.Max(yMax, s.y);
+                yMean += s.y;
+            }
+            yMean /= samples.Count;
+
+            double spread = yMax - yMin;
+            double relSpread = spread / (Math.Abs(yMean) + 1e-12);
+            if (relSpread < 0.02)
+            {
+                residuals = new[] { 0.5 }; // force mismatch for flat sequences
+                return double.NaN;
+            }
+
+            double minT = samples.Min(s => s.t);
+            double maxT = samples.Max(s => s.t);
+            if (!(minT > 0) || !double.IsFinite(maxT) || maxT <= 0)
+            {
+                residuals = new[] { double.PositiveInfinity };
+                return double.NaN;
+            }
+
+            int withSig = samples.Count(s => s.hasSig);
+            double maxSig = samples.Where(s => s.hasSig).Select(s => s.sig).DefaultIfEmpty(1.0).Max();
+            double minSig = samples.Where(s => s.hasSig).Select(s => s.sig).DefaultIfEmpty(1.0).Min();
+            bool useWeights = withSig >= Math.Max(2, samples.Count / 2) && maxSig / Math.Max(minSig, 1e-12) < 1e6;
+
             double bestTau = double.NaN;
             double bestErr = double.PositiveInfinity;
-            double tMin = minT * 0.25;
-            double tMax = maxT * 10.0;
+            double bestYinf = double.NaN;
 
-            for (int s = 0; s < 40; s++)
+            double tMin = minT * 0.05;
+            double tMax = maxT * 20.0;
+            if (tMin <= 0 || tMax <= tMin * 1.01)
             {
-                double logTau = Math.Log(tMin) + (Math.Log(tMax / tMin) * s) / 39.0;
-                double tau = Math.Exp(logTau);
-                double err = 0;
-                for (int i = 0; i < n; i++)
+                residuals = new[] { double.PositiveInfinity };
+                return double.NaN;
+            }
+
+            int steps = 80;
+            double logSpan = Math.Log(tMax / tMin);
+            for (int sIdx = 0; sIdx < steps; sIdx++)
+            {
+                double tau = Math.Exp(Math.Log(tMin) + logSpan * sIdx / (steps - 1));
+                double num = 0, den = 0, err = 0, wTot = 0;
+
+                foreach (var smp in samples)
                 {
-                    if (sigY[i] <= 0 || !double.IsFinite(sigY[i]) || !double.IsFinite(Y[i])) continue;
-                    double w = 1.0 / (sigY[i] * sigY[i]);
-                    double t = GateWidthUs(i) / 1e6;
-                    double model = yInf * (1.0 - Math.Exp(-t / tau));
-                    double diff = Y[i] - model;
+                    double f = 1.0 - Math.Exp(-smp.t / tau);
+                    if (!double.IsFinite(f) || f <= 0) continue;
+                    double w = useWeights ? 1.0 / (smp.sig * smp.sig) : 1.0;
+                    num += w * smp.y * f;
+                    den += w * f * f;
+                    wTot += w;
+                }
+
+                if (!(den > 0) || !(wTot > 0)) continue;
+                double yInf = num / den;
+                foreach (var smp in samples)
+                {
+                    double f = 1.0 - Math.Exp(-smp.t / tau);
+                    if (!double.IsFinite(f) || f <= 0) continue;
+                    double w = useWeights ? 1.0 / (smp.sig * smp.sig) : 1.0;
+                    double diff = smp.y - yInf * f;
                     err += w * diff * diff;
                 }
-                if (err < bestErr)
+
+                double normErr = err / wTot;
+                if (normErr < bestErr)
                 {
-                    bestErr = err;
+                    bestErr = normErr;
                     bestTau = tau;
+                    bestYinf = yInf;
                 }
             }
 
-            var resArr = new System.Collections.Generic.List<double>(n);
-            if (double.IsFinite(bestTau))
+            var resArr = new System.Collections.Generic.List<double>(samples.Count);
+            if (double.IsFinite(bestTau) && double.IsFinite(bestYinf))
             {
-                for (int i = 0; i < n; i++)
+                foreach (var smp in samples)
                 {
-                    if (sigY[i] <= 0 || !double.IsFinite(sigY[i]) || !double.IsFinite(Y[i])) continue;
-                    double t = GateWidthUs(i) / 1e6;
-                    double model = yInf * (1.0 - Math.Exp(-t / bestTau));
-                    resArr.Add(Y[i] - model);
+                    double f = 1.0 - Math.Exp(-smp.t / bestTau);
+                    if (!double.IsFinite(f) || f <= 0) continue;
+                    double model = bestYinf * f;
+                    resArr.Add(smp.y - model);
                 }
+            }
+            else
+            {
+                resArr.Add(double.PositiveInfinity);
             }
 
             residuals = resArr.ToArray();
