@@ -49,7 +49,8 @@ namespace AdaptiveWindowTests
         private static AdaptiveWindowEngine.Estimate GenerateEstimate(IReadOnlyList<int> gateCounts)
         {
             const int gateUs = 200;
-            double windowSec = Math.Max(gateCounts.Count * gateUs / 1e6, gateUs / 1e6);
+            double rawWindowSec = gateCounts.Count * gateUs / 1e6;
+            double windowSec = Math.Max(1e-3, rawWindowSec);
             int deltaUs = Math.Max(1, gateUs / 10);
 
             using var engine = new AdaptiveWindowEngine(
