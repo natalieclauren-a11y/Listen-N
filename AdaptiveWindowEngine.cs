@@ -1,4 +1,4 @@
-﻿// AdaptiveWindowEngine.cs
+// AdaptiveWindowEngine.cs
 // Purpose: Implements an adaptive sliding-window engine for real-time neutron noise analysis.
 // Scope: Ingests detection events, maintains a circular buffer of counts, computes factorial moments,
 //        estimates the Feynman-Y statistic, and adapts gate/window size to meet uncertainty targets.
