@@ -384,10 +384,9 @@ namespace Listen_N
             for (int k = 0; k < _tgUs.Length; k++)
             {
                 int gateUs = GateWidthUs(k);
-                MomentCovariance rawCov = default;
                 _acc.ComputeMoments(_W, gateUs,
                     out var m1, out var m2, out var m3, out var N,
-                    ref rawCov);
+                    out var rawCov);
 
                 bool covOk = RegularizeCov(rawCov, out var cov);
                 illConditioned |= !covOk;
@@ -1064,51 +1063,28 @@ namespace Listen_N
             }
 
             // Compute factorial moments over gates within current window
-            public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, ref MomentCovariance cov)
+            public void ComputeMoments(double wSec, int gateUs, out double m1, out double m2, out double m3, out int N, out MomentCovariance cov)
             {
-                // compute how many microseconds per bin
-                double binWidthUs = DeltaUs;
-
-                // determine number of gates in the window
-                double windowUs = wSec * 1e6;
-                int gateCount = (int)Math.Max(1, Math.Floor(windowUs / gateUs));
-                var gates = new List<int>(gateCount);
-
-                // treat bins as time segments and integrate counts according to overlap
-                int nbins = _counts.Length;
-                for (int g = 0; g < gateCount; g++)
-                {
-                    double gateStart = _t0Us + g * gateUs;
-                    double gateEnd = gateStart + gateUs;
-                    double sumGate = 0.0;
-
-                    for (int b = 0; b < nbins; b++)
-                    {
-                        double binStart = _t0Us + b * binWidthUs;
-                        double binEnd = binStart + binWidthUs;
-
-                        // compute fractional overlap of this bin with this gate
-                        double overlap = Math.Min(binEnd, gateEnd) - Math.Max(binStart, gateStart);
-                        if (overlap > 0)
-                        {
-                            double frac = overlap / binWidthUs;
-                            sumGate += frac * _counts[b];
-                        }
-                    }
-
-                    gates.Add((int)Math.Round(sumGate));
-                }
-
-                N = gateCount;
+                int binsPerGate = Math.Max(1, gateUs / DeltaUs);
+                int gatesInWindow = Math.Max(1, (int)Math.Floor(wSec * 1e6 / gateUs));
+                N = Math.Min(gatesInWindow, MaxBins / binsPerGate);
                 if (N <= 0) { m1 = m2 = m3 = 0; cov = new MomentCovariance(); return; }
+
+                int startPhys = _head;
+
+                // initial sum for first gate
+                int sum = 0;
+                for (int b = 0; b < binsPerGate; b++) sum += _counts[(startPhys + b) % MaxBins];
 
                 long s1 = 0, s2 = 0, s3 = 0;
                 double sumN2 = 0, sumF22 = 0, sumF32 = 0;
                 double sumNF2 = 0, sumNF3 = 0, sumF2F3 = 0;
+                int binPtr = (startPhys + binsPerGate) % MaxBins;
 
+                // slide gate across window
                 for (int g = 0; g < N; g++)
                 {
-                    int nj = gates[g];
+                    int nj = sum;
                     s1 += nj;
                     s2 += (long)nj * (nj - 1);
                     s3 += (long)nj * (nj - 1) * (nj - 2);
@@ -1122,6 +1098,17 @@ namespace Listen_N
                     sumNF2 += nj * f2;
                     sumNF3 += nj * f3;
                     sumF2F3 += f2 * f3;
+
+                    if (g < N - 1)
+                    {
+                        for (int b = 0; b < binsPerGate; b++)
+                        {
+                            int outIdx = (startPhys + g * binsPerGate + b) % MaxBins;
+                            sum -= _counts[outIdx];
+                            sum += _counts[(binPtr + b) % MaxBins];
+                        }
+                        binPtr = (binPtr + binsPerGate) % MaxBins;
+                    }
                 }
 
                 double invN = 1.0 / N;
@@ -1129,36 +1116,16 @@ namespace Listen_N
                 m2 = s2 * invN;
                 m3 = s3 * invN;
 
-                gateCount = gates.Count;
-                if (gateCount >= 2)
-                {
-                    double m1Hat = (double)gates.Sum() / gateCount;
-                    double m2Hat = gates.Select(g => g * (g - 1)).Average();
+                // sample covariance of gate-level factorial moments
+                double varN = Math.Max(0.0, (sumN2 - N * m1 * m1) / Math.Max(1, N - 1));
+                double varF2 = Math.Max(0.0, (sumF22 - N * m2 * m2) / Math.Max(1, N - 1));
+                double varF3 = Math.Max(0.0, (sumF32 - N * m3 * m3) / Math.Max(1, N - 1));
+                double covNF2 = (sumNF2 - N * m1 * m2) / Math.Max(1, N - 1);
+                double covNF3 = (sumNF3 - N * m1 * m3) / Math.Max(1, N - 1);
+                double covF2F3 = (sumF2F3 - N * m2 * m3) / Math.Max(1, N - 1);
 
-                    double v11 = 0.0;
-                    double v22 = 0.0;
-                    double v12 = 0.0;
-
-                    for (int i = 0; i < gateCount; i++)
-                    {
-                        double gi = gates[i];
-                        double fi = gi * (gi - 1);
-
-                        v11 += (gi - m1Hat) * (gi - m1Hat);
-                        v22 += (fi - m2Hat) * (fi - m2Hat);
-                        v12 += (gi - m1Hat) * (fi - m2Hat);
-                    }
-
-                    v11 /= (gateCount - 1);
-                    v22 /= (gateCount - 1);
-                    v12 /= (gateCount - 1);
-
-                    cov = new MomentCovariance(v11, v22, 0.0, v12, 0.0, 0.0);
-                }
-                else
-                {
-                    cov = new MomentCovariance();
-                }
+                cov = new MomentCovariance(varN * invN, varF2 * invN, varF3 * invN,
+                    covNF2 * invN, covNF3 * invN, covF2F3 * invN);
             }
 
             public long LeftEdgeUs => _t0Us;
