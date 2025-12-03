@@ -102,18 +102,21 @@ namespace AdaptiveWindowTests
             double windowSec = Math.Max(1, gates.Count) * gateUs / 1e6;
 
             var engineType = typeof(Listen_N.AdaptiveWindowEngine);
-            var accType = engineType.GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic);
+            var accType = engineType.GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("BaseBinAccumulator type not found");
 
             object acc = Activator.CreateInstance(
-                accType!,
+                accType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                binder: null,
+                binder: null!,
                 args: new object[] { gateUs, windowSec, (int?)null },
-                culture: null
+                culture: null!
             )!;
 
-            var add = accType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
-            var compute = accType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+            var add = accType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Missing Add method on BaseBinAccumulator.");
+            var compute = accType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Missing ComputeMoments method on BaseBinAccumulator.");
 
             long t = 0;
             for (int i = 0; i < gates.Count; i++)
@@ -126,8 +129,10 @@ namespace AdaptiveWindowTests
 
             // cov struct
             var parameters = compute.GetParameters();
-            Type covType = parameters[6].ParameterType.GetElementType()!;
-            object cov = Activator.CreateInstance(covType)!;
+            Type covType = parameters[6].ParameterType.GetElementType()
+                ?? throw new InvalidOperationException("Covariance parameter type missing element type");
+            object cov = Activator.CreateInstance(covType)!
+                ?? throw new InvalidOperationException("Failed to instantiate covariance struct");
 
             object[] argsCompute =
             {
