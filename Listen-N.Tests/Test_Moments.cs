@@ -98,20 +98,20 @@ namespace AdaptiveWindowTests
             double windowSec = Math.Max(1, gates.Count) * gateUs / 1e6;
 
             var accumulatorType = typeof(AdaptiveWindowEngine)
-                .GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("Unable to locate BaseBinAccumulator via reflection.");
+                .GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic);
+
+            if (accumulatorType == null)
+                throw new InvalidOperationException("Unable to locate BaseBinAccumulator via reflection.");
 
             var accumulator = Activator.CreateInstance(
                 accumulatorType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                binder: null!,
-                args: new object[] { gateUs, windowSec, (int?)null },
-                culture: null!);
+                binder: null,
+                args: new object[] { gateUs, windowSec },
+                culture: null);
 
-            var addMethod = accumulatorType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public)
-                ?? throw new InvalidOperationException("Missing Add method on BaseBinAccumulator.");
-            var computeMethod = accumulatorType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public)
-                ?? throw new InvalidOperationException("Missing ComputeMoments method on BaseBinAccumulator.");
+            var addMethod = accumulatorType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public);
+            var computeMethod = accumulatorType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public);
 
             // Feed synthetic gates
             for (int i = 0; i < gates.Count; i++)
@@ -128,25 +128,25 @@ namespace AdaptiveWindowTests
             int N = 0;
 
             // Get the underlying type of the by-ref covariance parameter
-              var covParamType = computeMethod.GetParameters()[6].ParameterType;
-              var covUnderlyingType = covParamType.IsByRef
-                  ? covParamType.GetElementType()
-                  : covParamType;
+            var covParamType = computeMethod.GetParameters()[6].ParameterType;
+            var covUnderlyingType = covParamType.IsByRef
+                ? covParamType.GetElementType()
+                : covParamType;
 
-              // Instantiate the actual struct (NOT the by-ref type)
-              var cov = Activator.CreateInstance(covUnderlyingType!)!;
+            // Instantiate the actual struct (NOT the by-ref type)
+            var cov = Activator.CreateInstance(covUnderlyingType);
 
             // Prepare invocation args
             object[] invokeArgs =
             {
-          windowSec,
-          gateUs,
-          m1,
-          m2,
-          m3,
-          N,
-          cov
-      };
+        windowSec,
+        gateUs,
+        m1,
+        m2,
+        m3,
+        N,
+        cov
+    };
 
             // Call ComputeMoments via reflection
             computeMethod.Invoke(accumulator, invokeArgs);
