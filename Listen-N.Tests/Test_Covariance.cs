@@ -78,23 +78,22 @@ namespace AdaptiveWindowTests
             int gateUs = 1;
             double windowSec = Math.Max(1, gates.Count) * gateUs / 1e6;
 
-            var accumulatorType = typeof(AdaptiveWindowEngine).GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic);
-            if (accumulatorType == null)
-                throw new InvalidOperationException("Unable to locate BaseBinAccumulator via reflection.");
+            var accumulatorType = typeof(AdaptiveWindowEngine).GetNestedType("BaseBinAccumulator", BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Unable to locate BaseBinAccumulator via reflection.");
 
             object? accumulator = Activator.CreateInstance(
                 accumulatorType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                binder: null,
+                binder: null!,
                 args: new object[] { gateUs, windowSec, (int?)null },
                 culture: null);
             if (accumulator == null)
                 throw new InvalidOperationException("Failed to instantiate BaseBinAccumulator.");
 
-            var addMethod = accumulatorType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public);
-            var computeMethod = accumulatorType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public);
-            if (addMethod == null || computeMethod == null)
-                throw new InvalidOperationException("Missing expected BaseBinAccumulator methods.");
+            var addMethod = accumulatorType.GetMethod("Add", BindingFlags.Instance | BindingFlags.Public)
+                ?? throw new InvalidOperationException("Missing expected Add method on BaseBinAccumulator.");
+            var computeMethod = accumulatorType.GetMethod("ComputeMoments", BindingFlags.Instance | BindingFlags.Public)
+                ?? throw new InvalidOperationException("Missing expected ComputeMoments method on BaseBinAccumulator.");
 
             for (int i = 0; i < gates.Count; i++)
             {
