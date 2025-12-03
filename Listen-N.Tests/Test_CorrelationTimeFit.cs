@@ -66,13 +66,14 @@ namespace AdaptiveWindowTests
             var tgUs = new[] { 100, 200, 400, 800, 1600 };
             var engine = new AdaptiveWindowEngine(gateLadderUs: tgUs, startWorker: false);
 
-            var y = new[] { 0.05, 0.05, 0.04, 0.05, 0.05 };
+            var y = Enumerable.Repeat(0.05, tgUs.Length).ToArray();
             var sigY = Enumerable.Repeat(0.01, y.Length).ToArray();
 
             double tauHat = Fit(engine, y, sigY, out var residuals);
             double rms = residuals.Length == 0 ? double.PositiveInfinity : Math.Sqrt(residuals.Select(r => r * r).Average());
 
-            bool mismatch = double.IsNaN(tauHat) || tauHat > 1.0 || rms > 0.01;
+            double epsY = 0.10; // match default EpsY used by AdaptiveWindowEngine
+            bool mismatch = double.IsNaN(tauHat) || rms > (2.0 * epsY);
             Assert.True(mismatch, $"Expected mismatch: tau_hat={tauHat}, rms={rms}");
         }
 
