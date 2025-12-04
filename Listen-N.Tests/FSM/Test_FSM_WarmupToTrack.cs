@@ -57,6 +57,14 @@ namespace AdaptiveWindowTests.FSM
                         zy
                     });
             }
+            // Prevent Warmup from falling into Poisson
+            var zPoissonField = engineType.GetField("_zPoisson", BindingFlags.Instance | BindingFlags.NonPublic);
+            zPoissonField.SetValue(engine, 0.0);
+
+            var quietField = engineType.GetField("_poissonQuietStreak", BindingFlags.Instance | BindingFlags.NonPublic);
+            quietField.SetValue(engine, 0);
+
+
 
             // Step 1: ZY below track threshold; state should remain Warmup with no pending transition.
             Step(1_000_000L, 0.5 * zTrack);
