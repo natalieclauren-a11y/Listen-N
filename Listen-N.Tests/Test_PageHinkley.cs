@@ -21,10 +21,20 @@ namespace AdaptiveWindowTests
             SetField(engine, "_pendingFsm", Enum.Parse(fsmType, "Track"));
             SetField(engine, "_fsmConfirmations", 0);
             SetField(engine, "_phAlarm", false);
+            SetField(engine, "_cpMean", 10.0);
+            SetField(engine, "_cpCum", 0.0);
+            SetField(engine, "_cpZyMean", 0.0);
+            SetField(engine, "_cpZyCum", 0.0);
             SetField(engine, "_insufficientStatistics", false);
             SetField(engine, "_mismatchStreak", 0);
+            SetField(engine, "_mismatchClearStreak", 0);
             SetField(engine, "_poissonQuietStreak", 0);
             SetField(engine, "_zPoisson", 0.0);
+            SetField(engine, "_modelMismatch", false);
+            SetField(engine, "_statsBound", false);
+
+            // Start Page–Hinkley from a clean slate so we only exercise its response
+            // to the local noise in this scenario.
 
             double Y = 1.0;
             double sigY = 0.8;
@@ -35,7 +45,9 @@ namespace AdaptiveWindowTests
 
             for (int t = 0; t < 50; t++)
             {
-                double x = 10.0 + 0.0000001 * t;
+                // Stationary input with tiny bounded noise ensures Page–Hinkley
+                // is exercised on a gentle wander rather than a true trend.
+                double x = 10.0 + 1e-6 * Math.Sin(0.1 * t);
                 bool alarm = (bool)Invoke(engine, "RateChange", x);
 
                 Invoke(engine, "AdaptState", nowUs, Y, sigY, m1, varM1, 10, true, alarm, false, false, 0.0);
