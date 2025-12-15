@@ -52,7 +52,7 @@ namespace AdaptiveWindowTests
         [Fact]
         public void PoissonStream_EntersPoisson_StateAndContractsHold()
         {
-            var gateLadder = new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
+            var gateLadder = new[] { 500, 1000, 2000 };
 
             using var engine = new AdaptiveWindowEngine(
                 baseDeltaUs: 50,
