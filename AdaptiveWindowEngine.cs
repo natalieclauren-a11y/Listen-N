@@ -258,10 +258,13 @@ namespace Listen_N
         private void InitializeNextStep()
         {
             if (_nextStepUs != 0) return;
-            if (_acc.LeftEdgeUs == 0 && _lastTimestampUs == 0) return;
 
-            long anchorUs = _acc.LeftEdgeUs != 0 ? _acc.LeftEdgeUs : _lastTimestampUs;
-            _nextStepUs = anchorUs + (long)(_W * 1e6);
+            // Schedule first analysis tick at the end of the current window,
+            // even if LeftEdgeUs is 0 (valid when a scenario starts at t=0).
+            _nextStepUs = _acc.LeftEdgeUs + (long)(_W * 1e6);
+
+            // Ultra-defensive guard: if window is somehow zero, schedule the next tick at 1us.
+            if (_nextStepUs == 0) _nextStepUs = 1;
         }
 
         private void DrainInbound(ChannelReader<Detection>? reader = null)
