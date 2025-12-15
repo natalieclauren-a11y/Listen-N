@@ -1,5 +1,5 @@
-using System;
-using System.Reflection;
+using System.Collections.Generic;
+using System.Linq;
 using Listen_N;
 using Xunit;
 
@@ -10,52 +10,30 @@ namespace AdaptiveWindowTests
         [Fact]
         public void ModelMismatchTransitionsToDegraded()
         {
-            var engine = new AdaptiveWindowEngine(startWorker: false);
+            using var engine = new AdaptiveWindowEngine(startWorker: false);
             engine.EpsY = 1e-6; // make model mismatch triggers deterministic
 
-            var engineType = typeof(AdaptiveWindowEngine);
-            var fsmType = engineType.GetNestedType("FSM", BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("FSM enum not found via reflection.");
+            var estimates = new List<AdaptiveWindowEngine.Estimate>();
+            engine.OnEstimate += est => estimates.Add(est);
 
-            var fsmField = engineType.GetField("_fsm", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("_fsm field not found via reflection.");
-            var pendingFsmField = engineType.GetField("_pendingFsm", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("_pendingFsm field not found via reflection.");
-            var mismatchFlagField = engineType.GetField("_modelMismatch", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("_modelMismatch field not found via reflection.");
-            var mismatchRequiredField = engineType.GetField("_mismatchStreakRequired", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("_mismatchStreakRequired field not found via reflection.");
+            var timestamps = SyntheticTimestampGenerator
+                .CorrelatedBurstSource(seed: 2024, durationSec: 8.0)
+                .ToList();
 
-            var trackState = Enum.Parse(fsmType, "Track");
-            var degradedState = Enum.Parse(fsmType, "Degraded");
+            Assert.NotEmpty(timestamps);
 
-            // Start from Track so the Warmup heuristics do not override the mismatch-driven transition.
-            fsmField.SetValue(engine, trackState);
-            pendingFsmField.SetValue(engine, trackState);
+            engine.ResetTimestampState(timestamps[0]);
 
-            int mismatchRequired = (int)(mismatchRequiredField.GetValue(engine)
-                ?? throw new InvalidOperationException("_mismatchStreakRequired value missing."));
-
-            long nowUs = 600_000;
-            for (int i = 0; i < mismatchRequired; i++)
+            foreach (var t in timestamps)
             {
-                mismatchFlagField.SetValue(engine, true);
-                engine.ForceStep(nowUs);
-                nowUs += 200_000;
+                engine.OnDetection(new Detection(t));
+                engine.ForceStep(t);
             }
 
-            Assert.Equal(degradedState, pendingFsmField.GetValue(engine));
+            engine.ForceStep(timestamps[^1] + 2_000_000);
 
-            mismatchFlagField.SetValue(engine, true);
-            engine.ForceStep(nowUs);
-            nowUs += 200_000;
-
-            Assert.Equal(degradedState, fsmField.GetValue(engine));
-
-            mismatchFlagField.SetValue(engine, true);
-            engine.ForceStep(nowUs);
-
-            Assert.Equal(degradedState, fsmField.GetValue(engine));
+            Assert.Contains(estimates, est => est.ModelMismatch);
+            Assert.Contains(estimates, est => est.State == "Degraded");
         }
     }
 }
