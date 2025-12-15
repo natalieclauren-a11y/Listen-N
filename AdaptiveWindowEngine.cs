@@ -258,8 +258,10 @@ namespace Listen_N
         private void InitializeNextStep()
         {
             if (_nextStepUs != 0) return;
-            if (_acc.LeftEdgeUs == 0) return;
-            _nextStepUs = _acc.LeftEdgeUs + (long)(_W * 1e6);
+            if (_acc.LeftEdgeUs == 0 && _lastTimestampUs == 0) return;
+
+            long anchorUs = _acc.LeftEdgeUs != 0 ? _acc.LeftEdgeUs : _lastTimestampUs;
+            _nextStepUs = anchorUs + (long)(_W * 1e6);
         }
 
         private void DrainInbound(ChannelReader<Detection>? reader = null)
