@@ -169,6 +169,11 @@ namespace Listen_N
         private readonly int _poissonQuietRequired = 1;
         private int _poissonQuietStreak = 1;
 
+        private int _mismatchStreak;
+        private int _mismatchClearStreak;
+        private readonly int _mismatchStreakRequired = 3;
+        private readonly int _mismatchClearRequired = 6;
+
         private double _tauHat = double.NaN;
         private double[] _corrResiduals = Array.Empty<double>();
         private bool _statsBound;
@@ -325,6 +330,8 @@ namespace Listen_N
             _statsBound = false;
             _insufficientStatistics = false;
             _modelMismatch = false;
+            _mismatchStreak = 0;
+            _mismatchClearStreak = 0;
 
             _cpMean = 0;
             _cpCum = 0;
@@ -493,6 +500,17 @@ namespace Listen_N
             _modelMismatch = _corrResiduals != null
                              && _corrResiduals.Length > 0
                              && Rms(_corrResiduals) > (_epsY * 2.0);
+
+            if (_modelMismatch)
+            {
+                _mismatchStreak++;
+                _mismatchClearStreak = 0;
+            }
+            else
+            {
+                _mismatchClearStreak++;
+                _mismatchStreak = 0;
+            }
 
             int desiredIdx = _tgIdx;
             if (significantIdx < 0)
@@ -677,6 +695,11 @@ namespace Listen_N
             double zy = sigY > 0 && double.IsFinite(sigY) ? Y / sigY : 0;
             bool needHold = singlesChange || correlationChange;
 
+            if (_mismatchStreak >= _mismatchStreakRequired && _fsm != FSM.Degraded)
+            {
+                RequestFsmState(FSM.Degraded, nowUs);
+            }
+
             switch (_fsm)
             {
                 case FSM.Warmup:
@@ -837,8 +860,11 @@ namespace Listen_N
                     }
                     _beta = 0.1;
                     _tgIdx = 0;
-                    _W = Math.Min(_W * 1.1, _wMax);
-                    if (!degraded && hasSignificance) RequestFsmState(FSM.Track, nowUs);
+                    _W = Math.Min(_W * 1.2, _wMax);
+                    if (_mismatchClearStreak >= _mismatchClearRequired)
+                    {
+                        RequestFsmState(FSM.Track, nowUs);
+                    }
                     break;
             }
         }

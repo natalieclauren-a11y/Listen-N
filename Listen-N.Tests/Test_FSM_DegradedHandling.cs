@@ -7,40 +7,55 @@ namespace AdaptiveWindowTests
 {
     public class Test_FSM_DegradedHandling
     {
-        // Degraded mismatch handling is not currently implemented: AdaptiveWindowEngine
-        // tracks a _modelMismatch flag but never counts consecutive mismatches or
-        // requests the Degraded FSM state based on that condition. Once a mismatch
-        // streak counter (for example, _modelMismatchCount/_mismatchStreak) and a
-        // transition hook into RequestFsmState are present, this test can be
-        // enabled to exercise the intended behavior.
-        [Fact(Skip = "Degraded mismatch handling not implemented yet")]
+        [Fact]
         public void ModelMismatchTransitionsToDegraded()
         {
             var engine = new AdaptiveWindowEngine(startWorker: false);
+            engine.EpsY = 1e-6; // make model mismatch triggers deterministic
 
             var engineType = typeof(AdaptiveWindowEngine);
             var fsmType = engineType.GetNestedType("FSM", BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("FSM enum not found via reflection.");
 
-            // Ensure we can reach the FSM fields and the mismatch indicator.
-            _ = engineType.GetField("_fsm", BindingFlags.Instance | BindingFlags.NonPublic)
+            var fsmField = engineType.GetField("_fsm", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("_fsm field not found via reflection.");
-            _ = engineType.GetField("_pendingFsm", BindingFlags.Instance | BindingFlags.NonPublic)
+            var pendingFsmField = engineType.GetField("_pendingFsm", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("_pendingFsm field not found via reflection.");
-            _ = engineType.GetField("_fsmConfirmations", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("_fsmConfirmations field not found via reflection.");
-            _ = engineType.GetField("_modelMismatch", BindingFlags.Instance | BindingFlags.NonPublic)
+            var mismatchFlagField = engineType.GetField("_modelMismatch", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("_modelMismatch field not found via reflection.");
+            var mismatchRequiredField = engineType.GetField("_mismatchStreakRequired", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("_mismatchStreakRequired field not found via reflection.");
 
-            var warmupState = Enum.Parse(fsmType, "Warmup");
+            var trackState = Enum.Parse(fsmType, "Track");
             var degradedState = Enum.Parse(fsmType, "Degraded");
-            _ = warmupState;
-            _ = degradedState;
 
-            // The rest of the test should drive correlated timestamps into the engine,
-            // trigger repeated model mismatch detections, and assert that the FSM
-            // moves to Degraded after the confirmation threshold. That behavior is
-            // currently unreachable because model mismatch does not influence the FSM.
+            // Start from Track so the Warmup heuristics do not override the mismatch-driven transition.
+            fsmField.SetValue(engine, trackState);
+            pendingFsmField.SetValue(engine, trackState);
+
+            int mismatchRequired = (int)(mismatchRequiredField.GetValue(engine)
+                ?? throw new InvalidOperationException("_mismatchStreakRequired value missing."));
+
+            long nowUs = 600_000;
+            for (int i = 0; i < mismatchRequired; i++)
+            {
+                mismatchFlagField.SetValue(engine, true);
+                engine.ForceStep(nowUs);
+                nowUs += 200_000;
+            }
+
+            Assert.Equal(degradedState, pendingFsmField.GetValue(engine));
+
+            mismatchFlagField.SetValue(engine, true);
+            engine.ForceStep(nowUs);
+            nowUs += 200_000;
+
+            Assert.Equal(degradedState, fsmField.GetValue(engine));
+
+            mismatchFlagField.SetValue(engine, true);
+            engine.ForceStep(nowUs);
+
+            Assert.Equal(degradedState, fsmField.GetValue(engine));
         }
     }
 }
