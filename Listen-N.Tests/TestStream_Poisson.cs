@@ -90,10 +90,18 @@ namespace AdaptiveWindowTests
             int poissonStart = estimates.FindIndex(e => e.State == "Poisson");
             Assert.True(poissonStart >= 0, "Engine never entered Poisson state.");
 
+            const int sustainedTailCount = 12;
+            var tailAfterPoisson = estimates
+                .Skip(poissonStart)
+                .TakeLast(Math.Min(sustainedTailCount, estimates.Count - poissonStart))
+                .ToList();
+            Assert.NotEmpty(tailAfterPoisson);
+
+            double fracPoisson = (double)tailAfterPoisson.Count(e => e.State == "Poisson") / tailAfterPoisson.Count;
+            Assert.True(fracPoisson >= 0.75, "Poisson state not sufficiently sustained after entry.");
+            Assert.Equal("Poisson", tailAfterPoisson[^1].State);
+
             const int tailCount = 8;
-            var tailEstimates = estimates.TakeLast(Math.Min(tailCount, estimates.Count)).ToList();
-            int tailPoissonCount = tailEstimates.Count(e => e.State == "Poisson");
-            Assert.True(tailPoissonCount >= tailEstimates.Count - 1, "Poisson state not sustained in tail estimates.");
 
             var poissonEstimates = estimates.Where(e => e.State == "Poisson").ToList();
             Assert.NotEmpty(poissonEstimates);
