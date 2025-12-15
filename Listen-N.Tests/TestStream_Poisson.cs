@@ -98,8 +98,16 @@ namespace AdaptiveWindowTests
             Assert.NotEmpty(tailAfterPoisson);
 
             double fracPoisson = (double)tailAfterPoisson.Count(e => e.State == "Poisson") / tailAfterPoisson.Count;
-            Assert.True(fracPoisson >= 0.75, "Poisson state not sufficiently sustained after entry.");
-            Assert.Equal("Poisson", tailAfterPoisson[^1].State);
+            if (fracPoisson < 0.75 || tailAfterPoisson[^1].State != "Poisson")
+            {
+                var dump = tailAfterPoisson.Select(e =>
+                    $"t={e.NowUs} state={e.State} Tg={e.GateUs} W={e.WindowSec:0.###} " +
+                    $"Y={e.Y:0.0000} sY={e.SigmaY:0.0000} ZY={e.ZY:0.00}"
+                );
+                throw new Xunit.Sdk.XunitException(
+                    "Poisson not sufficiently sustained after entry.\n" + string.Join("\n", dump)
+                );
+            }
 
             const int tailCount = 8;
 
