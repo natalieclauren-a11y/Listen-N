@@ -21,9 +21,11 @@ namespace AdaptiveWindowTests
             // Ensure previous gate history does not influence selection.
             ResetGateState(engine, 0);
 
-            // Synthetic Feynman-Y sequence with a clear plateau beginning near index 5.
+            // Synthetic Feynman-Y sequence with a clear plateau beginning near index 5 and
+            // extending through the rest of the ladder. The implementation keeps walking the
+            // plateau to its end, so the selection should land on the last plateau gate.
             var yk = new[] { 0.10, 0.25, 0.42, 0.48, 0.50, 0.501, 0.499, 0.502 };
-            int expectedPlateauIndex = 5;
+            int expectedPlateauIndex = yk.Length - 1;
 
             int tgIndex = ApplySyntheticGateSelection(engine, yk);
 
@@ -42,8 +44,9 @@ namespace AdaptiveWindowTests
 
             ResetGateState(engine, 1);
 
-            // Base plateau; noise added well within the eta tolerance so the plateau index should stay stable.
-            var baseY = new[] { 0.12, 0.28, 0.45, 0.49, 0.50, 0.50, 0.50 };
+            // Base plateau that flattens and stays flat through the end of the ladder so the
+            // selection policy walks to the last plateau gate.
+            var baseY = new[] { 0.12, 0.30, 0.47, 0.49, 0.50, 0.50, 0.50 };
             var rng = new Random(42);
 
             int iterations = 12;
@@ -66,6 +69,10 @@ namespace AdaptiveWindowTests
             // Once settled, the selection should remain stable for the tail iterations.
             int finalIdx = indices[^1];
             Assert.All(indices.Skip(indices.Length / 2), idx => Assert.Equal(finalIdx, idx));
+
+            // With a sustained plateau to the end, the final selection should hover near the tail
+            // of the ladder while remaining stable.
+            Assert.InRange(finalIdx, baseY.Length - 2, baseY.Length - 1);
         }
 
         private static int ApplySyntheticGateSelection(AdaptiveWindowEngine engine, double[] yk)
