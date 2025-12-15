@@ -187,16 +187,18 @@ namespace Listen_N
         private double _cpZyMean, _cpZyCum;
 
         public AdaptiveWindowEngine(
-            int baseDeltaUs = 50,
-            double windowStartSec = 0.5,
-            double windowMinSec = 0.5,
-            double windowMaxSec = 60.0,
-            int[]? gateLadderUs = null,
-            int zMin = 3,
-            double epsY = 0.10,
-            double epsM1 = 0.02,
-            bool startWorker = true,
-            int minGateCountForZ = 0)
+           int baseDeltaUs = 50,
+           double windowStartSec = 0.5,
+           double windowMinSec = 0.5,
+           double windowMaxSec = 60.0,
+           int[]? gateLadderUs = null,
+           int zMin = 3,
+           double epsY = 0.10,
+           double epsM1 = 0.02,
+           bool startWorker = true,
+           int minGateCountForZ = 0,
+           bool enableFileLog = true,
+           string? logPath = "adaptive.log")
         {
             _tgUs = gateLadderUs ?? new[] { 500, 1000, 2000, 4000, 8000, 16000, 32000 };
             _tgIsMilliseconds = _tgUs.Length > 0 && _tgUs[0] < 100;
@@ -215,7 +217,9 @@ namespace Listen_N
             _minGateCountForZ = Math.Max(0, minGateCountForZ);
 
             _deltaUs = Math.Max(baseDeltaUs, Math.Max(10, GateWidthUs(0) / 10));
-
+            _startWorker = startWorker;
+            _enableFileLog = enableFileLog && startWorker;   // key line: tests (startWorker:false) will not log
+            _logPath = logPath;
             // initialize accumulator and channel infrastructure
             _acc = new BaseBinAccumulator(_deltaUs, _wMax);
             _inbound = Channel.CreateBounded<Detection>(new BoundedChannelOptions(1 << 16)
@@ -229,6 +233,23 @@ namespace Listen_N
                 _worker.Start();
             }
         }
+
+        // Add near other fields (class scope)
+        private readonly bool _enableFileLog;
+        private readonly string? _logPath;
+        private static readonly object _logLock = new();
+
+        // Add a small helper (class scope)
+        private static void AppendLineShared(string path, string line)
+        {
+            lock (_logLock)
+            {
+                using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                using var sw = new StreamWriter(fs);
+                sw.WriteLine(line);
+            }
+        }
+
 
         public void Dispose()
         {
@@ -477,7 +498,7 @@ namespace Listen_N
             if (significantIdx < 0)
             {
                 desiredIdx = 0;
-                RequestFsmState(FSM.LowRate, nowUs);
+            
             }
             else
             {
@@ -548,7 +569,12 @@ namespace Listen_N
             };
 
             string json = System.Text.Json.JsonSerializer.Serialize(log, options);
-            System.IO.File.AppendAllText("adaptive.log", json + Environment.NewLine);
+
+            if (_enableFileLog && !string.IsNullOrWhiteSpace(_logPath))
+            {
+                AppendLineShared(_logPath, json);
+            }
+
 
             OnEstimate?.Invoke(est);
         }
