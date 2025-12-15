@@ -60,7 +60,7 @@ namespace AdaptiveWindowTests
                 windowStartSec: 0.5,
                 windowMinSec: 0.5,
                 windowMaxSec: 60.0,
-                zMin: 3,
+                zMin: 1,
                 epsY: 0.10,
                 epsM1: 0.02,
                 startWorker: false,
