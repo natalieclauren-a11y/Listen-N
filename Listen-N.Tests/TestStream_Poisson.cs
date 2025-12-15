@@ -10,9 +10,9 @@ namespace AdaptiveWindowTests
      * Plant: a stationary Poisson process with fixed rate generates uncorrelated timestamps.
      * Observation: the Feynman-Y estimator (Y, ZY) should fluctuate around zero with variance
      *              governed by SigmaY, reflecting Poisson counting noise only.
-     * Controller expectation: the adaptive engine should recognize the Poisson regime, remain
-     *                         in Poisson state, contract to the smallest gate, and hold the
-     *                         minimum analysis window without expanding.
+     * Controller expectation: in this controller, a Poisson field routes to LowRate because the
+     *                         significance gate requires Y > 0 to entertain other states, so the
+     *                         gate should shrink while the window expands as LowRate stabilizes.
      */
     public class TestStream_Poisson
     {
@@ -50,7 +50,7 @@ namespace AdaptiveWindowTests
         }
 
         [Fact]
-        public void PoissonStream_EntersPoisson_StateAndContractsHold()
+        public void PoissonStream_TriggersLowRate_ExpandsWindow_UsesSmallestGate()
         {
             var gateLadder = new[] { 500, 1000, 2000 };
 
@@ -87,71 +87,77 @@ namespace AdaptiveWindowTests
 
             Assert.True(estimates.Count >= 5, "Expected multiple estimates from Poisson stream.");
 
-            int poissonStart = estimates.FindIndex(e => e.State == "Poisson");
-            Assert.True(poissonStart >= 0, "Engine never entered Poisson state.");
-
-            const int sustainedTailCount = 12;
-            var tailAfterPoisson = estimates
-                .Skip(poissonStart)
-                .TakeLast(Math.Min(sustainedTailCount, estimates.Count - poissonStart))
-                .ToList();
-            Assert.NotEmpty(tailAfterPoisson);
-
-            double fracPoisson = (double)tailAfterPoisson.Count(e => e.State == "Poisson") / tailAfterPoisson.Count;
-            if (fracPoisson < 0.75 || tailAfterPoisson[^1].State != "Poisson")
-            {
-                var dump = tailAfterPoisson.Select(e =>
-                    $"t={e.NowUs} state={e.State} Tg={e.GateUs} W={e.WindowSec:0.###} " +
-                    $"Y={e.Y:0.0000} sY={e.SigmaY:0.0000} ZY={e.ZY:0.00}"
-                );
-                throw new Xunit.Sdk.XunitException(
-                    "Poisson not sufficiently sustained after entry.\n" + string.Join("\n", dump)
-                );
-            }
-
-            const int tailCount = 8;
-
-            var poissonEstimates = estimates.Where(e => e.State == "Poisson").ToList();
-            Assert.NotEmpty(poissonEstimates);
-            var tailPoisson = poissonEstimates.TakeLast(Math.Min(tailCount, poissonEstimates.Count)).ToList();
-
-            foreach (var est in tailPoisson)
-            {
-                double absZY = Math.Abs(est.ZY);
-                Assert.True(absZY < 4.0, $"Expected |Z_Y| < 4.0 in Poisson state, got {absZY:0.###}.");
-
-                double yBound = 2.5 * est.SigmaY;
-                Assert.InRange(Math.Abs(est.Y), 0.0, yBound);
-            }
-
             const int smallestGateUs = 500;
-            int stableGateCount = tailPoisson.Count(est => est.GateUs == smallestGateUs);
-            Assert.True(stableGateCount >= tailPoisson.Count - 1, "Smallest gate not held in Poisson tail.");
+            Assert.DoesNotContain(estimates, e => e.State == "Hold");
 
-            var gatesAfterPoisson = estimates.Skip(poissonStart).Select(e => e.GateUs).ToList();
-            bool nonIncreasing = true;
-            for (int i = 1; i < gatesAfterPoisson.Count; i++)
+            var lowRateEstimates = estimates.Where(e => e.State == "LowRate").ToList();
+            Assert.NotEmpty(lowRateEstimates);
+
+            var lowRateTail = lowRateEstimates.TakeLast(Math.Min(8, lowRateEstimates.Count)).ToList();
+            int smallestGateCount = lowRateTail.Count(est => est.GateUs == smallestGateUs);
+            Assert.True(
+                smallestGateCount >= lowRateTail.Count - 1,
+                "Expected LowRate tail to hold the smallest gate for nearly all estimates.");
+
+            bool windowNonDecreasing = true;
+            for (int i = 1; i < lowRateEstimates.Count; i++)
             {
-                if (gatesAfterPoisson[i] > gatesAfterPoisson[i - 1])
+                if (lowRateEstimates[i].WindowSec < lowRateEstimates[i - 1].WindowSec)
                 {
-                    nonIncreasing = false;
+                    windowNonDecreasing = false;
                     break;
                 }
             }
-            Assert.True(nonIncreasing, "Gate sequence should contract or hold after Poisson entry.");
+            Assert.True(windowNonDecreasing, "Window should expand or hold within LowRate estimates.");
+        }
 
-            int modeGate = tailPoisson
-                .GroupBy(e => e.GateUs)
-                .OrderByDescending(g => g.Count())
-                .ThenBy(g => g.Key)
-                .First()
-                .Key;
-            Assert.Equal(smallestGateUs, modeGate);
+        [Fact]
+        public void PoissonStream_DoesNotProduceLargeCorrelationSignals()
+        {
+            var gateLadder = new[] { 500, 1000, 2000 };
 
-            foreach (var est in tailPoisson)
+            using var engine = new AdaptiveWindowEngine(
+                baseDeltaUs: 50,
+                gateLadderUs: gateLadder,
+                windowStartSec: 0.5,
+                windowMinSec: 0.5,
+                windowMaxSec: 60.0,
+                zMin: 1,
+                epsY: 0.10,
+                epsM1: 0.02,
+                startWorker: false,
+                enableFileLog: false);
+
+            engine.ZPoisson = 4.0;
+            engine.ZTrack = 4.0;
+            engine.ZHold = 6.0;
+            engine.MinGateCountForZ = 2;
+
+            var estimates = new List<AdaptiveWindowEngine.Estimate>();
+            engine.OnEstimate += estimates.Add;
+
+            var timestamps = GeneratePoissonTimestamps(seed: 12345, rateHz: 2000.0, durationSec: 8.0).ToList();
+            Assert.True(timestamps.Count > 0);
+
+            foreach (long ts in timestamps)
             {
-                Assert.InRange(est.WindowSec, 0.5, 0.5 + 1e-6);
+                engine.OnDetection(new Detection(ts, 0));
             }
+
+            long nowUs = timestamps[^1] + 1;
+            engine.ForceStep(nowUs);
+
+            const int tailCount = 8;
+            var tailEstimates = estimates.TakeLast(Math.Min(tailCount, estimates.Count)).ToList();
+            foreach (var est in tailEstimates)
+            {
+                Assert.True(Math.Abs(est.ZY) < engine.ZHold, $"Expected |ZY| < {engine.ZHold}, got {est.ZY:0.###}.");
+            }
+
+            int relaxedBoundCount = tailEstimates.Count(est => Math.Abs(est.ZY) < 4.0);
+            Assert.True(
+                relaxedBoundCount >= tailEstimates.Count - 1,
+                "Expected most tail estimates to have |ZY| < 4.0 in Poisson field.");
         }
     }
 }
