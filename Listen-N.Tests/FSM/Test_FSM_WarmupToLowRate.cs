@@ -18,6 +18,8 @@ namespace AdaptiveWindowTests.FSM
 
             var enterState = engineType.GetMethod("EnterState", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("EnterState method not found via reflection.");
+            var adaptState = engineType.GetMethod("AdaptState", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("AdaptState method not found via reflection.");
 
             var fsmField = engineType.GetField("_fsm", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("_fsm field not found via reflection.");
@@ -38,14 +40,33 @@ namespace AdaptiveWindowTests.FSM
             var trackState = Enum.Parse(fsmType, "Track");
             var holdState = Enum.Parse(fsmType, "Hold");
 
-            engine.ResetTimestampState(0);
             enterState.Invoke(engine, new object[] { warmupState, 0L });
 
             zPoissonField.SetValue(engine, 0.0);
             poissonQuietStreakField.SetValue(engine, 0);
-            poissonQuietRequiredField.SetValue(engine, long.MaxValue);
+            poissonQuietRequiredField.SetValue(engine, 999);
 
-            engine.ForceStep(1_000_000L);
+            void Step(long nowUs)
+            {
+                adaptState.Invoke(
+                    engine,
+                    new object[]
+                    {
+                        nowUs,
+                        0.0,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0,
+                        false,
+                        false,
+                        false,
+                        false,
+                        0.0
+                    });
+            }
+
+            Step(1_000_000L);
 
             Assert.Equal(warmupState, fsmField.GetValue(engine));
             Assert.Equal(lowRateState, pendingFsmField.GetValue(engine));
@@ -54,7 +75,7 @@ namespace AdaptiveWindowTests.FSM
             Assert.NotEqual(trackState, pendingFsmField.GetValue(engine));
             Assert.NotEqual(holdState, pendingFsmField.GetValue(engine));
 
-            engine.ForceStep(2_000_000L);
+            Step(2_000_000L);
 
             Assert.Equal(lowRateState, fsmField.GetValue(engine));
             Assert.Equal(lowRateState, pendingFsmField.GetValue(engine));
