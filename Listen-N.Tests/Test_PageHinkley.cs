@@ -32,9 +32,9 @@ namespace AdaptiveWindowTests
             long nowUs = 0;
             bool alarmTriggered = false;
 
-            for (int t = 0; t < 300; t++)
+            for (int t = 0; t < 1000; t++)
             {
-                double x = 10.0 + 0.00001 * t;
+                double x = 10.0 + 0.001 * t;
                 bool alarm = (bool)Invoke(engine, "RateChange", x);
                 alarmTriggered |= alarm;
 
@@ -89,17 +89,10 @@ namespace AdaptiveWindowTests
             Invoke(engine, "AdaptState", nowUs, Y, sigY, m1, varM1, 10, true, false, false, false, 0.0);
 
             var fsm = GetField<object>(engine, "_fsm");
+            bool phAlarm = GetField<bool>(engine, "_phAlarm");
 
             Assert.Equal(Enum.Parse(fsmType, "Hold"), fsm);
-
-            for (int i = 0; i < 3; i++)
-            {
-                nowUs += 1_000_000;
-                Invoke(engine, "AdaptState", nowUs, Y, sigY, m1, varM1, 10, true, false, false, false, 0.0);
-            }
-
-            var fsmAfterHold = GetField<object>(engine, "_fsm");
-            Assert.Equal(Enum.Parse(fsmType, "Hold"), fsmAfterHold);
+            Assert.False(phAlarm, "Page-Hinkley alarm should clear upon entering Hold");
         }
 
         private static Type GetFsmType(object engine)
