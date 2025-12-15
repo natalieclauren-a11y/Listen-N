@@ -497,18 +497,23 @@ namespace Listen_N
 
             // correlation-time fit across ladder
             _tauHat = FitCorrelationTime(Yk, sigYk, out _corrResiduals);
-            _modelMismatch = _corrResiduals != null
-                             && _corrResiduals.Length > 0
-                             && Rms(_corrResiduals) > (_epsY * 2.0);
+            double rms = (_corrResiduals != null && _corrResiduals.Length > 0) ? Rms(_corrResiduals) : double.PositiveInfinity;
+            bool fitMeaningful = double.IsFinite(_tauHat) && double.IsFinite(rms);
+            _modelMismatch = fitMeaningful && rms > (_epsY * 2.0);
 
-            if (_modelMismatch)
+            if (fitMeaningful && _modelMismatch)
             {
                 _mismatchStreak++;
                 _mismatchClearStreak = 0;
             }
-            else
+            else if (fitMeaningful && !_modelMismatch)
             {
                 _mismatchClearStreak++;
+                _mismatchStreak = 0;
+            }
+            else
+            {
+                _mismatchClearStreak = 0;
                 _mismatchStreak = 0;
             }
 
