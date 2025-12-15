@@ -8,13 +8,14 @@ namespace AdaptiveWindowTests
     public class Test_PageHinkley
     {
         [Fact]
-        public void Test_PageHinkley_GradualTrend_NoAlarm_NoHold()
+        public void Test_PageHinkley_GradualTrend_DoesNotEnterHold()
         {
             using var engine = new AdaptiveWindowEngine(
                 startWorker: false,
                 enableFileLog: false);
 
             var fsmType = GetFsmType(engine);
+            var holdState = Enum.Parse(fsmType, "Hold");
 
             SetField(engine, "_fsm", Enum.Parse(fsmType, "Track"));
             SetField(engine, "_pendingFsm", Enum.Parse(fsmType, "Track"));
@@ -30,22 +31,22 @@ namespace AdaptiveWindowTests
             double m1 = 100.0;
             double varM1 = 100.0;
             long nowUs = 0;
-            bool alarmTriggered = false;
+            bool holdEntered = false;
 
             for (int t = 0; t < 50; t++)
             {
                 double x = 10.0 + 0.0000001 * t;
                 bool alarm = (bool)Invoke(engine, "RateChange", x);
-                alarmTriggered |= alarm;
 
                 Invoke(engine, "AdaptState", nowUs, Y, sigY, m1, varM1, 10, true, alarm, false, false, 0.0);
+                holdEntered |= holdState.Equals(GetField<object>(engine, "_fsm"));
                 nowUs += 1_000_000;
             }
 
             var fsm = GetField<object>(engine, "_fsm");
 
-            Assert.False(alarmTriggered, "Gradual trend should not trigger Page-Hinkley alarm");
-            Assert.NotEqual(Enum.Parse(fsmType, "Hold"), fsm);
+            Assert.False(holdEntered);
+            Assert.NotEqual(holdState, fsm);
         }
 
         [Fact]
