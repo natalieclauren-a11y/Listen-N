@@ -67,9 +67,9 @@ namespace AdaptiveWindowTests
                 enableFileLog: false);
 
             engine.ZPoisson = 4.0;
-            engine.ZTrack = 3.0;
+            engine.ZTrack = 4.0;
             engine.ZHold = 6.0;
-            engine.MinGateCountForZ = 0;
+            engine.MinGateCountForZ = 2;
 
             var estimates = new List<AdaptiveWindowEngine.Estimate>();
             engine.OnEstimate += estimates.Add;
