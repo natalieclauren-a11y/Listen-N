@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Listen_N;
 using Xunit;
+using Xunit.Sdk;
 
 namespace AdaptiveWindowTests
 {
@@ -142,11 +143,52 @@ namespace AdaptiveWindowTests
 
             var tail = steady.TakeLast(Math.Min(20, steady.Count)).ToList();
 
+            var bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var engineType = typeof(AdaptiveWindowEngine);
+            var yField = engineType.GetField("_yByGate", bindingFlags)
+                ?? engineType.GetFields(bindingFlags).FirstOrDefault(f =>
+                    f.FieldType == typeof(double[]) &&
+                    f.Name.Contains("y", StringComparison.OrdinalIgnoreCase) &&
+                    f.Name.Contains("gate", StringComparison.OrdinalIgnoreCase));
+            var syField = engineType.GetField("_sigmaYByGate", bindingFlags)
+                ?? engineType.GetFields(bindingFlags).FirstOrDefault(f =>
+                    f.FieldType == typeof(double[]) &&
+                    f.Name.Contains("y", StringComparison.OrdinalIgnoreCase) &&
+                    f.Name.Contains("gate", StringComparison.OrdinalIgnoreCase) &&
+                    (f.Name.Contains("sigma", StringComparison.OrdinalIgnoreCase) ||
+                     f.Name.Contains("sy", StringComparison.OrdinalIgnoreCase)));
+
+            Assert.NotNull(yField);
+            Assert.NotNull(syField);
+
+            double[] yByGate = (double[])(yField!.GetValue(engine) ?? throw new InvalidOperationException("Missing Y ladder."));
+            double[] sYByGate = (double[])(syField!.GetValue(engine) ?? throw new InvalidOperationException("Missing sigmaY ladder."));
+
+            var zByGate = yByGate.Zip(sYByGate, (y, sy) => sy > 0 ? y / sy : double.NaN).ToArray();
+
+            Assert.True(zByGate.Any(z => double.IsFinite(z) && z > 1.0),
+                "Correlated plant produced no significant positive Y at any gate. This indicates a plant/test parameter issue or an engine regression in ladder computation.");
+
             int poissonTailCount = tail.Count(e => e.State == "Poisson");
             Assert.True(poissonTailCount <= 2, $"Expected correlated tail to avoid Poisson; got {poissonTailCount}/{tail.Count} Poisson.");
             Assert.NotEqual("Poisson", tail[^1].State);
             int positiveY = tail.Count(e => e.Y > 0 && e.ZY > 1.0);
-            Assert.True(positiveY >= 0.7 * tail.Count, "Expected correlated stream to yield predominantly positive Y values with meaningful Z.");
+            if (positiveY < 0.7 * tail.Count)
+            {
+                string tailDump = string.Join("; ", tail.Select(e => $"state={e.State}, gate={e.GateUs}, Y={e.Y:F3}, ZY={e.ZY:F3}"));
+                string ladderDump = string.Join("; ", gateLadderUs.Select((gate, idx) =>
+                {
+                    double yVal = idx < yByGate.Length ? yByGate[idx] : double.NaN;
+                    double zVal = idx < zByGate.Length ? zByGate[idx] : double.NaN;
+                    return $"gate={gate}us: Y={yVal:F3}, ZY={zVal:F3}";
+                }));
+
+                throw new XunitException(
+                    "Expected correlated stream to yield predominantly positive Y values with meaningful Z." + Environment.NewLine +
+                    $"positiveY={positiveY}, tailCount={tail.Count}" + Environment.NewLine +
+                    $"Tail: {tailDump}" + Environment.NewLine +
+                    $"Ladder: {ladderDump}");
+            }
 
             int modalGateUs = tail
                 .GroupBy(e => e.GateUs)
