@@ -210,19 +210,21 @@ namespace AdaptiveWindowTests
                     phaseAHasEvent = phaseAGen.MoveNext();
                 }
 
+                int prevCount = estimates.Count;
                 engine.ForceStep(nowUs);
                 lastNowUs = nowUs;
 
-                var latestEstimate = estimates.LastOrDefault();
-                if (latestEstimate != null)
+                if (estimates.Count > prevCount)
                 {
+                    var latestEstimate = estimates[^1];
+
                     bool isSettled = latestEstimate.State == "Track" && latestEstimate.State != "Degraded";
                     if (isSettled)
                     {
                         calmCount++;
                         if (calmCount >= calmNeeded)
                         {
-                            phaseAEndUs = nowUs;
+                            phaseAEndUs = latestEstimate.NowUs;
                             break;
                         }
                     }
@@ -270,7 +272,9 @@ namespace AdaptiveWindowTests
 
             var preStepTail = estimates.Where(e => e.NowUs <= phaseAEndUs).TakeLast(3).ToList();
             Assert.NotEmpty(preStepTail);
-            Assert.DoesNotContain(preStepTail, e => e.State == "Degraded");
+
+            var preStep = estimates.Last(e => e.NowUs <= phaseAEndUs);
+            Assert.NotEqual("Degraded", preStep.State);
 
             int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
