@@ -185,7 +185,7 @@ namespace AdaptiveWindowTests
             double phaseAParentRateCps = 200.0;
             double phaseAWindowSec = 20.0;
             double phaseBDurationSec = 12.0;
-            double phaseBParentRateCps = 1000.0;
+            double phaseBParentRateCps = 2000.0;
             int meanClusterSize = 2;
             double childMeanDelayUs = 800.0;
 
@@ -242,6 +242,8 @@ namespace AdaptiveWindowTests
                     DumpTail(trace));
             }
 
+            long stepStartUs = phaseAEndUs + stepIntervalUs;
+
             var phaseBGen = GenerateClusteredSegment(seed: 24680, startUs: phaseAEndUs, durationSec: phaseBDurationSec, parentRateCps: phaseBParentRateCps, meanClusterSize: meanClusterSize, childMeanDelayUs: childMeanDelayUs)
                 .GetEnumerator();
             bool phaseBHasEvent = phaseBGen.MoveNext();
@@ -277,22 +279,28 @@ namespace AdaptiveWindowTests
             Assert.Equal("Track", preStep.State);
             Assert.NotEqual("Degraded", preStep.State);
 
-            int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
+            int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= stepStartUs);
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
 
             int maxEstimatesAfterStep = 10;
-            long maxUsAfterStep = 10_000_000;
+            long maxUsAfterStep = 6_000_000;
 
             int firstHoldIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Hold");
             bool holdSoonEnough =
                 firstHoldIndex >= 0 &&
                 (firstHoldIndex - firstPhaseBIndex) <= maxEstimatesAfterStep &&
-                (estimates[firstHoldIndex].NowUs - phaseAEndUs) <= maxUsAfterStep;
+                (estimates[firstHoldIndex].NowUs - stepStartUs) <= maxUsAfterStep;
 
             if (!holdSoonEnough)
             {
+                var statesAfterStep = string.Join("; ", estimates
+                    .Skip(firstPhaseBIndex)
+                    .Take(8)
+                    .Select(e => $"t={e.NowUs} state={e.State}"));
+
                 throw new XunitException(
                     "Expected Hold entry shortly after rate step." + Environment.NewLine +
+                    $"stepStartUs={stepStartUs} statesAfterStep=[{statesAfterStep}]" + Environment.NewLine +
                     DumpTail(trace));
             }
 
