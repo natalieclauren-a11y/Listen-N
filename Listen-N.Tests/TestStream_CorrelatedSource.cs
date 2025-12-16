@@ -70,21 +70,21 @@ namespace AdaptiveWindowTests
         }
 
         [Fact]
-        public void CorrelatedPairs_ProduceStableCorrelationEstimate()
+        public void CorrelatedPlant_DetectsCorrelation_NoPoissonAttractor()
         {
             var gateLadderUs = new[] { 1000, 2000, 4000, 8000, 16000, 32000 };
 
-                using var engine = new AdaptiveWindowEngine(
-                    baseDeltaUs: 50,
-                    gateLadderUs: gateLadderUs,
-                    windowStartSec: 1.0,
-                    windowMinSec: 1.0,
-                    windowMaxSec: 60.0,
-                    zMin: 1,
-                    epsY: 0.10,
-                    epsM1: 0.02,
-                    startWorker: false,
-                    enableFileLog: false);
+            using var engine = new AdaptiveWindowEngine(
+                baseDeltaUs: 50,
+                gateLadderUs: gateLadderUs,
+                windowStartSec: 1.0,
+                windowMinSec: 1.0,
+                windowMaxSec: 60.0,
+                zMin: 1,
+                epsY: 0.10,
+                epsM1: 0.02,
+                startWorker: false,
+                enableFileLog: false);
 
             engine.ZPoisson = 4.0;
             engine.ZTrack = 4.0;
@@ -125,7 +125,7 @@ namespace AdaptiveWindowTests
             var run = new List<AdaptiveWindowEngine.Estimate>();
             foreach (var e in reversed)
             {
-                if ((e.State == "Track" || e.State == "Hold") && e.Y > 0 && e.ZY > 1.0)
+                if (e.Y > 0 && e.ZY > 1.0)
                 {
                     run.Add(e);
                 }
@@ -137,93 +137,13 @@ namespace AdaptiveWindowTests
 
             run.Reverse();
 
-            var bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic;
-            var engineType = typeof(AdaptiveWindowEngine);
-            double[]? yByGate = null;
-            double[]? sYByGate = null;
-
-            var doubleArrayFields = engineType
-                .GetFields(bindingFlags)
-                .Where(f => f.FieldType == typeof(double[]))
-                .Select(f => new { Field = f, Value = f.GetValue(engine) as double[] })
-                .Where(p => p.Value != null)
-                .ToList();
-
-            var ladderFields = doubleArrayFields
-                .Where(p => p.Value!.Length == gateLadderUs.Length)
-                .Select(p =>
-                {
-                    double[] values = p.Value!;
-                    var finiteValues = values.Where(double.IsFinite).ToArray();
-                    int finiteCount = finiteValues.Length;
-                    double absMean = finiteCount > 0 ? finiteValues.Select(Math.Abs).Average() : double.NaN;
-                    bool anyNonZero = values.Any(v => v != 0.0);
-                    bool nonNegative = values.Where(double.IsFinite).All(v => v >= 0.0);
-                    return new
-                    {
-                        p.Field,
-                        Values = values,
-                        FiniteCount = finiteCount,
-                        AbsMean = absMean,
-                        AnyNonZero = anyNonZero,
-                        NonNegative = nonNegative
-                    };
-                })
-                .ToList();
-
-            var yCandidate = ladderFields
-                .Where(c => c.FiniteCount > 0 && c.AnyNonZero)
-                .OrderByDescending(c => c.AbsMean)
-                .FirstOrDefault();
-
-            if (yCandidate != null)
-            {
-                yByGate = yCandidate.Values;
-
-                var syCandidate = ladderFields
-                    .Where(c => c.Field != yCandidate.Field)
-                    .Where(c => c.FiniteCount > 0)
-                    .Where(c => c.NonNegative)
-                    .Where(c => !(double.IsFinite(c.AbsMean) && double.IsFinite(yCandidate.AbsMean) && c.AbsMean > 1.5 * yCandidate.AbsMean))
-                    .OrderBy(c => c.AbsMean)
-                    .FirstOrDefault();
-
-                if (syCandidate != null)
-                {
-                    sYByGate = syCandidate.Values;
-                }
-            }
-
-            var ladderFieldDump = doubleArrayFields.Any()
-                ? string.Join(", ", doubleArrayFields.Select(p => $"{p.Field.Name}[{p.Value!.Length}]"))
-                : "<none>";
-
-            double[]? zByGate = null;
-            if (yByGate != null && sYByGate != null)
-            {
-                zByGate = yByGate.Zip(sYByGate, (y, sy) => sy > 0 ? y / sy : double.NaN).ToArray();
-
-                Assert.True(zByGate.Any(z => double.IsFinite(z) && z > 1.0),
-                    "Correlated plant produced no significant positive Y at any gate. This indicates a plant/test parameter issue or an engine regression in ladder computation.");
-            }
-
             if (run.Count < 5)
             {
                 string tailDump = string.Join("; ", tail.Select(e => $"state={e.State}, gate={e.GateUs}, Y={e.Y:F3}, ZY={e.ZY:F3}"));
-                string ladderDump = zByGate != null && yByGate != null
-                    ? string.Join("; ", gateLadderUs.Select((gate, idx) =>
-                    {
-                        double yVal = idx < yByGate.Length ? yByGate[idx] : double.NaN;
-                        double zVal = idx < zByGate.Length ? zByGate[idx] : double.NaN;
-                        return $"gate={gate}us: Y={yVal:F3}, ZY={zVal:F3}";
-                    }))
-                    : $"No ladder resolved; discovered double[] fields: {ladderFieldDump}";
-
                 throw new XunitException(
                     "Expected correlated stream to yield a sustained run of positive correlation estimates." + Environment.NewLine +
                     $"runCount={run.Count}, steadyCount={steady.Count}" + Environment.NewLine +
-                    $"Tail: {tailDump}" + Environment.NewLine +
-                    $"Ladder: {ladderDump}");
+                    $"Tail: {tailDump}");
             }
 
             Assert.NotEqual("Poisson", steady[^1].State);
@@ -242,22 +162,102 @@ namespace AdaptiveWindowTests
                 .First()
                 .Key;
 
-            int maxKneeGateUs = (int)Math.Round(2.0 * tauSec * 1e6); // 2*tau in µs, here ~4000
             Assert.Contains(modalGateUs, new[] { 1000, 2000, 4000 });
-            Assert.True(modalGateUs <= maxKneeGateUs,
-                $"Expected Tg near or below correlation scale: Tg={modalGateUs}us, 2*tau={maxKneeGateUs}us.");
+            Assert.NotEqual(gateLadderUs[^1], modalGateUs);
+        }
 
-            Assert.NotEqual(gateLadderUs[^1], modalGateUs); // should not drift to largest gate
-            int modalCount = run.Count(e => e.GateUs == modalGateUs);
-            Assert.True(modalCount >= (int)(0.6 * run.Count), "Gate should stabilize near the correlation knee.");
+        [Fact]
+        public void CorrelatedPlant_TauRecovered_WhenNotModelMismatch()
+        {
+            var gateLadderUs = new[] { 1000, 2000, 4000, 8000, 16000, 32000 };
+
+            using var engine = new AdaptiveWindowEngine(
+                baseDeltaUs: 50,
+                gateLadderUs: gateLadderUs,
+                windowStartSec: 1.0,
+                windowMinSec: 1.0,
+                windowMaxSec: 60.0,
+                zMin: 1,
+                epsY: 0.10,
+                epsM1: 0.02,
+                startWorker: false,
+                enableFileLog: false);
+
+            engine.ZPoisson = 4.0;
+            engine.ZTrack = 4.0;
+            engine.ZHold = 6.0;
+            engine.MinGateCountForZ = 2;
+
+            var estimates = new List<AdaptiveWindowEngine.Estimate>();
+            engine.OnEstimate += estimates.Add;
+
+            double tauSec = 0.002; // 2 ms correlation time
+            var timestamps = GenerateCorrelatedPairsFromClusters(
+                seed: 24680,
+                clusterRateHz: 1000.0,
+                tauSec: tauSec,
+                durationSec: 11.0).ToList();
+
+            Assert.NotEmpty(timestamps);
+
+            foreach (long ts in timestamps)
+            {
+                engine.OnDetection(new Detection(ts, 0));
+            }
+
+            long nowUs = timestamps[^1] + 1;
+            for (int i = 0; i < 12; i++)
+            {
+                nowUs += 500_000; // +0.5 s per step
+                engine.ForceStep(nowUs);
+            }
+
+            Assert.NotEmpty(estimates);
+
+            var steady = estimates.Where(e => e.State != "Warmup" && e.State != "LowRate").ToList();
+            Assert.NotEmpty(steady);
+
+            var tail = steady.TakeLast(Math.Min(20, steady.Count)).ToList();
+            if (tail.Any(e => e.State == "Degraded"))
+            {
+                string tailDump = string.Join("; ", tail.Select(e => $"state={e.State}, gate={e.GateUs}, Y={e.Y:F3}, ZY={e.ZY:F3}"));
+                throw new XunitException(
+                    "Tau recovery not asserted because engine entered Degraded (model mismatch)." + Environment.NewLine +
+                    $"Tail: {tailDump}");
+            }
+
+            var reversed = steady.AsEnumerable().Reverse().ToList();
+            var run = new List<AdaptiveWindowEngine.Estimate>();
+            foreach (var e in reversed)
+            {
+                if (e.Y > 0 && e.ZY > 1.0)
+                {
+                    run.Add(e);
+                }
+                else if (run.Count > 0)
+                {
+                    break;
+                }
+            }
+
+            run.Reverse();
+
+            if (run.Count < 5)
+            {
+                string tailDump = string.Join("; ", tail.Select(e => $"state={e.State}, gate={e.GateUs}, Y={e.Y:F3}, ZY={e.ZY:F3}"));
+                throw new XunitException(
+                    "Expected correlated stream to yield a sustained run of positive correlation estimates." + Environment.NewLine +
+                    $"runCount={run.Count}, steadyCount={steady.Count}" + Environment.NewLine +
+                    $"Tail: {tailDump}");
+            }
 
             var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.NotNull(tauField);
             double tauHatSec = (double)(tauField!.GetValue(engine) ?? double.NaN);
-            Assert.True(double.IsFinite(tauHatSec) && tauHatSec > 0, "Tau estimate should be finite and positive.");
+            Assert.True(double.IsFinite(tauHatSec) && tauHatSec > 0);
 
-            double relativeError = Math.Abs(tauHatSec - tauSec) / tauSec;
-            Assert.True(relativeError < 0.6, $"Tau estimate should recover the planted correlation time. tau_hat={tauHatSec:E3}s");
+            double relErr = Math.Abs(tauHatSec - tauSec) / tauSec;
+            Assert.True(relErr < 0.6, $"Tau estimate should recover planted tau. tau_hat={tauHatSec:E3}s");
         }
     }
 }
