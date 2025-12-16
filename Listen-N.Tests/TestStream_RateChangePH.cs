@@ -192,7 +192,7 @@ namespace AdaptiveWindowTests
             long stepIntervalUs = 20_000; // 20 ms
             long phaseAEndUs = 0;
 
-            int calmNeeded = 3;
+            int calmNeeded = 2;
             int calmCount = 0;
 
             var phaseAGen = GenerateClusteredSegment(seed: 13579, startUs: 0, durationSec: phaseAWindowSec, parentRateCps: phaseAParentRateCps, meanClusterSize: meanClusterSize, childMeanDelayUs: childMeanDelayUs)
@@ -218,7 +218,7 @@ namespace AdaptiveWindowTests
                 {
                     var latestEstimate = estimates[^1];
 
-                    bool isSettled = latestEstimate.State == "Track" && latestEstimate.State != "Degraded";
+                    bool isSettled = latestEstimate.State == "Track";
                     if (isSettled)
                     {
                         calmCount++;
@@ -274,6 +274,7 @@ namespace AdaptiveWindowTests
             Assert.NotEmpty(preStepTail);
 
             var preStep = estimates.Last(e => e.NowUs <= phaseAEndUs);
+            Assert.Equal("Track", preStep.State);
             Assert.NotEqual("Degraded", preStep.State);
 
             int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
