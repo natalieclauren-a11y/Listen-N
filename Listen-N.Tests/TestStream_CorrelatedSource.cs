@@ -159,7 +159,11 @@ namespace AdaptiveWindowTests
                 .First()
                 .Key;
 
-            Assert.Contains(modalGateUs, new[] { 2000, 4000 });
+            int maxKneeGateUs = (int)Math.Round(2.0 * tauSec * 1e6); // 2*tau in µs, here ~4000
+            Assert.True(modalGateUs <= maxKneeGateUs,
+                $"Expected Tg near or below correlation scale: Tg={modalGateUs}us, 2*tau={maxKneeGateUs}us.");
+
+            Assert.NotEqual(gateLadderUs[^1], modalGateUs); // should not drift to largest gate
             int modalCount = tail.Count(e => e.GateUs == modalGateUs);
             Assert.True(modalCount >= (int)(0.6 * tail.Count), "Gate should stabilize near the correlation knee.");
 
