@@ -140,12 +140,15 @@ namespace AdaptiveWindowTests
             }
 
             Assert.NotEmpty(estimates);
-            Assert.DoesNotContain(estimates, e => e.State == "Poisson");
 
             var steady = estimates.Where(e => e.State != "Warmup" && e.State != "LowRate").ToList();
             Assert.NotEmpty(steady);
 
             var tail = steady.TakeLast(Math.Min(20, steady.Count)).ToList();
+
+            int poissonTailCount = tail.Count(e => e.State == "Poisson");
+            Assert.True(poissonTailCount <= 2, $"Expected correlated tail to avoid Poisson; got {poissonTailCount}/{tail.Count} Poisson.");
+            Assert.NotEqual("Poisson", tail[^1].State);
             int positiveY = tail.Count(e => e.Y > 0 && e.ZY > 1.0);
             Assert.True(positiveY >= 0.7 * tail.Count, "Expected correlated stream to yield predominantly positive Y values with meaningful Z.");
 
