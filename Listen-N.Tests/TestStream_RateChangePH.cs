@@ -119,14 +119,22 @@ namespace AdaptiveWindowTests
 
             long phaseAEndUs = (long)(segments[0].durationSec * 1e6);
 
-            var settledPhaseA = estimates
-                .Where(e => e.NowUs > 1_000_000 && e.NowUs < phaseAEndUs)
+            long preStepWindowUs = 1_000_000; // 1 s
+            long preStepStartUs = Math.Max(0, phaseAEndUs - preStepWindowUs);
+
+            var preStepEstimates = estimates
+                .Where(e => e.NowUs >= preStepStartUs && e.NowUs < phaseAEndUs)
                 .ToList();
-            Assert.NotEmpty(settledPhaseA);
-            Assert.DoesNotContain(settledPhaseA, e => e.State == "Hold" || e.State == "Degraded");
+            Assert.NotEmpty(preStepEstimates);
+
+            Assert.DoesNotContain(estimates.Where(e => e.NowUs < phaseAEndUs), e => e.State == "Degraded");
+
+            Assert.DoesNotContain(preStepEstimates, e => e.State == "Hold" || e.State == "Degraded");
 
             int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
+
+            int lastHoldBeforeStep = estimates.FindLastIndex(e => e.NowUs < phaseAEndUs && e.State == "Hold");
 
             int firstHoldIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Hold");
             if (firstHoldIndex < 0 || estimates[firstHoldIndex].NowUs - phaseAEndUs > 2_000_000)
@@ -135,6 +143,8 @@ namespace AdaptiveWindowTests
                     "Expected Hold entry shortly after rate step." + Environment.NewLine +
                     DumpTail(trace));
             }
+
+            Assert.True(firstHoldIndex > lastHoldBeforeStep, "Hold after step should be a new episode.");
 
             Assert.True(
                 firstHoldIndex + 1 < estimates.Count &&
