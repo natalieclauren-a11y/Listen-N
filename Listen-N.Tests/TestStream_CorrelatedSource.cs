@@ -10,17 +10,17 @@ namespace AdaptiveWindowTests
 {
     public class TestStream_CorrelatedSource
     {
-        private static IEnumerable<long> GenerateCorrelatedPairs(
+        private static IEnumerable<long> GenerateClusteredBursts(
             int seed,
-            double baseRateHz,
-            double pairFraction,
+            double clusterRateHz,
+            double meanMultiplicity,
             double tauSec,
             double durationSec)
         {
             var rng = new Random(seed);
             double tSec = 0.0;
-            long lastPrimaryUs = -1;
             var timestamps = new List<long>();
+            double minDtSec = 2 * 50 / 1e6; // enforce at least 2 * baseDeltaUs (100 us)
 
             while (tSec < durationSec)
             {
@@ -31,7 +31,7 @@ namespace AdaptiveWindowTests
                 }
                 while (u <= 0.0 || u >= 1.0);
 
-                double dtSec = -Math.Log(1 - u) / baseRateHz;
+                double dtSec = -Math.Log(1 - u) / clusterRateHz;
                 tSec += dtSec;
                 if (tSec > durationSec)
                 {
@@ -39,37 +39,32 @@ namespace AdaptiveWindowTests
                 }
 
                 long primaryUs = (long)Math.Round(tSec * 1e6);
-                if (primaryUs <= lastPrimaryUs)
+                timestamps.Add(primaryUs);
+
+                double p = 1.0 / meanMultiplicity;
+                int multiplicity = 1;
+                while (rng.NextDouble() > p)
                 {
-                    primaryUs = lastPrimaryUs + 1;
+                    multiplicity++;
                 }
 
-                timestamps.Add(primaryUs);
-                lastPrimaryUs = primaryUs;
-
-                if (rng.NextDouble() <= pairFraction)
+                for (int i = 1; i < multiplicity; i++)
                 {
-                    double dtPairSec;
+                    double v;
                     do
                     {
-                        double v;
-                        do
-                        {
-                            v = rng.NextDouble();
-                        }
-                        while (v <= 0.0 || v >= 1.0);
-
-                        dtPairSec = -Math.Log(1 - v) * tauSec;
+                        v = rng.NextDouble();
                     }
-                    while (dtPairSec < 0.1 * tauSec || dtPairSec > 4.0 * tauSec);
+                    while (v <= 0.0 || v >= 1.0);
 
-                    double pairedEventSec = tSec + dtPairSec;
-                    if (pairedEventSec <= durationSec)
+                    double dtBurstSec = -Math.Log(1 - v) * tauSec;
+                    dtBurstSec = Math.Max(minDtSec, dtBurstSec);
+
+                    double delayedEventSec = tSec + dtBurstSec;
+                    if (delayedEventSec <= durationSec)
                     {
-                        long dtPairUs = Math.Max(1L, (long)Math.Round(dtPairSec * 1e6));
-                        long pairedUs = primaryUs + dtPairUs;
-
-                        timestamps.Add(pairedUs);
+                        long delayedUs = primaryUs + (long)Math.Round(dtBurstSec * 1e6);
+                        timestamps.Add(delayedUs);
                     }
                 }
             }
@@ -115,10 +110,10 @@ namespace AdaptiveWindowTests
             engine.OnEstimate += estimates.Add;
 
             double tauSec = 0.002; // 2 ms correlation time
-            var timestamps = GenerateCorrelatedPairs(
+            var timestamps = GenerateClusteredBursts(
                 seed: 24680,
-                baseRateHz: 2200.0,
-                pairFraction: 0.5,
+                clusterRateHz: 1200.0,
+                meanMultiplicity: 1.8,
                 tauSec: tauSec,
                 durationSec: 11.0).ToList();
 
