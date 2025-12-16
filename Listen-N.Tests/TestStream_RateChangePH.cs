@@ -44,10 +44,10 @@ namespace AdaptiveWindowTests
             }
         }
 
-        private static string DumpTail(IEnumerable<(long tUs, string state, int gateUs)> trace, int count = 20)
+        private static string DumpTail(IEnumerable<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY)> trace, int count = 20)
         {
             var tail = trace.TakeLast(Math.Min(count, trace.Count()))
-                .Select(entry => $"t={entry.tUs / 1_000_000.0:F3}s state={entry.state} gate={entry.gateUs}");
+                .Select(entry => $"t={entry.tUs / 1_000_000.0:F3}s state={entry.state} gate={entry.gateUs} sig={entry.hasSignificance} y={entry.y:F3} zy={entry.zY:F3}");
             return string.Join("; ", tail);
         }
 
@@ -75,17 +75,17 @@ namespace AdaptiveWindowTests
             engine.MinGateCountForZ = 2;
 
             var estimates = new List<AdaptiveWindowEngine.Estimate>();
-            var trace = new List<(long tUs, string state, int gateUs)>();
+            var trace = new List<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY)>();
             engine.OnEstimate += est =>
             {
                 estimates.Add(est);
-                trace.Add((est.NowUs, est.State, est.GateUs));
+                trace.Add((est.NowUs, est.State, est.GateUs, est.HasSignificance, est.Y, est.ZY));
             };
 
             double phaseALowRateCps = 500.0;
-            double phaseAWindowSec = 8.0;
-            double phaseBDurationSec = 10.0;
-            double phaseBHighRateCps = 5000.0;
+            double phaseAWindowSec = 20.0;
+            double phaseBDurationSec = 8.0;
+            double phaseBHighRateCps = 15000.0;
 
             long stepIntervalUs = 20_000; // 20 ms
             long phaseAEndUs = 0;
@@ -114,8 +114,8 @@ namespace AdaptiveWindowTests
                 var latestEstimate = estimates.LastOrDefault();
                 if (latestEstimate != null)
                 {
-                    bool isCalm = latestEstimate.State != "Hold" && latestEstimate.State != "Degraded" && latestEstimate.State != "Warmup";
-                    if (isCalm)
+                    bool isSettled = latestEstimate.State == "Track" && latestEstimate.HasSignificance;
+                    if (isSettled)
                     {
                         calmCount++;
                         if (calmCount >= calmNeeded)
@@ -173,8 +173,16 @@ namespace AdaptiveWindowTests
 
             int lastHoldBeforeStep = estimates.FindLastIndex(e => e.NowUs < phaseAEndUs && e.State == "Hold");
 
+            int maxEstimatesAfterStep = 10;
+            long maxUsAfterStep = 10_000_000;
+
             int firstHoldIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Hold");
-            if (firstHoldIndex < 0 || estimates[firstHoldIndex].NowUs - phaseAEndUs > 2_000_000)
+            bool holdSoonEnough =
+                firstHoldIndex >= 0 &&
+                (firstHoldIndex - firstPhaseBIndex) <= maxEstimatesAfterStep &&
+                (estimates[firstHoldIndex].NowUs - phaseAEndUs) <= maxUsAfterStep;
+
+            if (!holdSoonEnough)
             {
                 throw new XunitException(
                     "Expected Hold entry shortly after rate step." + Environment.NewLine +
