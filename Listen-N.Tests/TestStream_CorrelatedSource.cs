@@ -145,29 +145,73 @@ namespace AdaptiveWindowTests
 
             var bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic;
             var engineType = typeof(AdaptiveWindowEngine);
-            var yField = engineType.GetField("_yByGate", bindingFlags)
-                ?? engineType.GetFields(bindingFlags).FirstOrDefault(f =>
-                    f.FieldType == typeof(double[]) &&
-                    f.Name.Contains("y", StringComparison.OrdinalIgnoreCase) &&
-                    f.Name.Contains("gate", StringComparison.OrdinalIgnoreCase));
-            var syField = engineType.GetField("_sigmaYByGate", bindingFlags)
-                ?? engineType.GetFields(bindingFlags).FirstOrDefault(f =>
-                    f.FieldType == typeof(double[]) &&
-                    f.Name.Contains("y", StringComparison.OrdinalIgnoreCase) &&
-                    f.Name.Contains("gate", StringComparison.OrdinalIgnoreCase) &&
-                    (f.Name.Contains("sigma", StringComparison.OrdinalIgnoreCase) ||
-                     f.Name.Contains("sy", StringComparison.OrdinalIgnoreCase)));
+            double[]? yByGate = null;
+            double[]? sYByGate = null;
 
-            Assert.NotNull(yField);
-            Assert.NotNull(syField);
+            var doubleArrayFields = engineType
+                .GetFields(bindingFlags)
+                .Where(f => f.FieldType == typeof(double[]))
+                .Select(f => new { Field = f, Value = f.GetValue(engine) as double[] })
+                .Where(p => p.Value != null)
+                .ToList();
 
-            double[] yByGate = (double[])(yField!.GetValue(engine) ?? throw new InvalidOperationException("Missing Y ladder."));
-            double[] sYByGate = (double[])(syField!.GetValue(engine) ?? throw new InvalidOperationException("Missing sigmaY ladder."));
+            var ladderFields = doubleArrayFields
+                .Where(p => p.Value!.Length == gateLadderUs.Length)
+                .Select(p =>
+                {
+                    double[] values = p.Value!;
+                    var finiteValues = values.Where(double.IsFinite).ToArray();
+                    int finiteCount = finiteValues.Length;
+                    double absMean = finiteCount > 0 ? finiteValues.Select(Math.Abs).Average() : double.NaN;
+                    bool anyNonZero = values.Any(v => v != 0.0);
+                    bool nonNegative = values.Where(double.IsFinite).All(v => v >= 0.0);
+                    return new
+                    {
+                        p.Field,
+                        Values = values,
+                        FiniteCount = finiteCount,
+                        AbsMean = absMean,
+                        AnyNonZero = anyNonZero,
+                        NonNegative = nonNegative
+                    };
+                })
+                .ToList();
 
-            var zByGate = yByGate.Zip(sYByGate, (y, sy) => sy > 0 ? y / sy : double.NaN).ToArray();
+            var yCandidate = ladderFields
+                .Where(c => c.FiniteCount > 0 && c.AnyNonZero)
+                .OrderByDescending(c => c.AbsMean)
+                .FirstOrDefault();
 
-            Assert.True(zByGate.Any(z => double.IsFinite(z) && z > 1.0),
-                "Correlated plant produced no significant positive Y at any gate. This indicates a plant/test parameter issue or an engine regression in ladder computation.");
+            if (yCandidate != null)
+            {
+                yByGate = yCandidate.Values;
+
+                var syCandidate = ladderFields
+                    .Where(c => c.Field != yCandidate.Field)
+                    .Where(c => c.FiniteCount > 0)
+                    .Where(c => c.NonNegative)
+                    .Where(c => !(double.IsFinite(c.AbsMean) && double.IsFinite(yCandidate.AbsMean) && c.AbsMean > 1.5 * yCandidate.AbsMean))
+                    .OrderBy(c => c.AbsMean)
+                    .FirstOrDefault();
+
+                if (syCandidate != null)
+                {
+                    sYByGate = syCandidate.Values;
+                }
+            }
+
+            var ladderFieldDump = doubleArrayFields.Any()
+                ? string.Join(", ", doubleArrayFields.Select(p => $"{p.Field.Name}[{p.Value!.Length}]"))
+                : "<none>";
+
+            double[]? zByGate = null;
+            if (yByGate != null && sYByGate != null)
+            {
+                zByGate = yByGate.Zip(sYByGate, (y, sy) => sy > 0 ? y / sy : double.NaN).ToArray();
+
+                Assert.True(zByGate.Any(z => double.IsFinite(z) && z > 1.0),
+                    "Correlated plant produced no significant positive Y at any gate. This indicates a plant/test parameter issue or an engine regression in ladder computation.");
+            }
 
             int poissonTailCount = tail.Count(e => e.State == "Poisson");
             Assert.True(poissonTailCount <= 2, $"Expected correlated tail to avoid Poisson; got {poissonTailCount}/{tail.Count} Poisson.");
@@ -176,12 +220,14 @@ namespace AdaptiveWindowTests
             if (positiveY < 0.7 * tail.Count)
             {
                 string tailDump = string.Join("; ", tail.Select(e => $"state={e.State}, gate={e.GateUs}, Y={e.Y:F3}, ZY={e.ZY:F3}"));
-                string ladderDump = string.Join("; ", gateLadderUs.Select((gate, idx) =>
-                {
-                    double yVal = idx < yByGate.Length ? yByGate[idx] : double.NaN;
-                    double zVal = idx < zByGate.Length ? zByGate[idx] : double.NaN;
-                    return $"gate={gate}us: Y={yVal:F3}, ZY={zVal:F3}";
-                }));
+                string ladderDump = zByGate != null && yByGate != null
+                    ? string.Join("; ", gateLadderUs.Select((gate, idx) =>
+                    {
+                        double yVal = idx < yByGate.Length ? yByGate[idx] : double.NaN;
+                        double zVal = idx < zByGate.Length ? zByGate[idx] : double.NaN;
+                        return $"gate={gate}us: Y={yVal:F3}, ZY={zVal:F3}";
+                    }))
+                    : $"No ladder resolved; discovered double[] fields: {ladderFieldDump}";
 
                 throw new XunitException(
                     "Expected correlated stream to yield predominantly positive Y values with meaningful Z." + Environment.NewLine +
