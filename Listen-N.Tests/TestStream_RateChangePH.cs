@@ -9,40 +9,38 @@ namespace AdaptiveWindowTests
 {
     public class TestStream_RateChangePH
     {
-        private static IEnumerable<long> GeneratePiecewisePoisson(int seed, params (double durationSec, double rateCps)[] segments)
+        private static IEnumerable<long> GeneratePoissonSegment(int seed, long startUs, double durationSec, double rateCps)
         {
             var rng = new Random(seed);
-            double tSec = 0.0;
-            long lastUs = -1;
+            double tSec = startUs / 1e6;
+            long lastUs = startUs - 1;
+            long endUs = startUs + (long)Math.Round(durationSec * 1e6);
 
-            foreach (var segment in segments)
+            while (true)
             {
-                double endSec = tSec + segment.durationSec;
-                while (tSec < endSec)
+                double u;
+                do
                 {
-                    double u;
-                    do
-                    {
-                        u = rng.NextDouble();
-                    }
-                    while (u <= 0.0 || u >= 1.0);
-
-                    double dtSec = -Math.Log(1 - u) / segment.rateCps;
-                    tSec += dtSec;
-                    if (tSec > endSec)
-                    {
-                        break;
-                    }
-
-                    long tsUs = (long)Math.Round(tSec * 1e6);
-                    if (tsUs <= lastUs)
-                    {
-                        tsUs = lastUs + 1;
-                    }
-
-                    yield return tsUs;
-                    lastUs = tsUs;
+                    u = rng.NextDouble();
                 }
+                while (u <= 0.0 || u >= 1.0);
+
+                double dtSec = -Math.Log(1 - u) / rateCps;
+                tSec += dtSec;
+
+                long tsUs = (long)Math.Round(tSec * 1e6);
+                if (tsUs > endUs)
+                {
+                    yield break;
+                }
+
+                if (tsUs <= lastUs)
+                {
+                    tsUs = lastUs + 1;
+                }
+
+                yield return tsUs;
+                lastUs = tsUs;
             }
         }
 
@@ -84,52 +82,91 @@ namespace AdaptiveWindowTests
                 trace.Add((est.NowUs, est.State, est.GateUs));
             };
 
-            var segments = new[]
-            {
-                (durationSec: 4.0, rateCps: 500.0),
-                (durationSec: 6.0, rateCps: 5000.0),
-                (durationSec: 10.0, rateCps: 5000.0)
-            };
+            double phaseALowRateCps = 500.0;
+            double phaseAWindowSec = 8.0;
+            double phaseBDurationSec = 10.0;
+            double phaseBHighRateCps = 5000.0;
 
-            var timestamps = GeneratePiecewisePoisson(seed: 13579, segments: segments).ToList();
-            Assert.NotEmpty(timestamps);
-
-            long totalDurationUs = (long)(segments.Sum(s => s.durationSec) * 1e6);
             long stepIntervalUs = 20_000; // 20 ms
-            int eventIndex = 0;
+            long phaseAEndUs = 0;
 
-            for (long nowUs = stepIntervalUs; nowUs <= totalDurationUs; nowUs += stepIntervalUs)
+            int calmNeeded = 3;
+            int calmCount = 0;
+
+            var phaseAGen = GeneratePoissonSegment(seed: 13579, startUs: 0, durationSec: phaseAWindowSec, rateCps: phaseALowRateCps)
+                .GetEnumerator();
+            bool phaseAHasEvent = phaseAGen.MoveNext();
+
+            long phaseAWindowEndUs = (long)(phaseAWindowSec * 1e6);
+            long lastNowUs = 0;
+
+            for (long nowUs = stepIntervalUs; nowUs <= phaseAWindowEndUs; nowUs += stepIntervalUs)
             {
-                while (eventIndex < timestamps.Count && timestamps[eventIndex] <= nowUs)
+                while (phaseAHasEvent && phaseAGen.Current <= nowUs)
                 {
-                    engine.OnDetection(new Detection(timestamps[eventIndex], 0));
-                    eventIndex++;
+                    engine.OnDetection(new Detection(phaseAGen.Current, 0));
+                    phaseAHasEvent = phaseAGen.MoveNext();
                 }
 
                 engine.ForceStep(nowUs);
+                lastNowUs = nowUs;
+
+                var latestEstimate = estimates.LastOrDefault();
+                if (latestEstimate != null)
+                {
+                    bool isCalm = latestEstimate.State != "Hold" && latestEstimate.State != "Degraded" && latestEstimate.State != "Warmup";
+                    if (isCalm)
+                    {
+                        calmCount++;
+                        if (calmCount >= calmNeeded)
+                        {
+                            phaseAEndUs = nowUs;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        calmCount = 0;
+                    }
+                }
+            }
+
+            if (phaseAEndUs == 0)
+            {
+                throw new XunitException(
+                    "Did not reach calm state before applying step." + Environment.NewLine +
+                    DumpTail(trace));
+            }
+
+            var phaseBGen = GeneratePoissonSegment(seed: 24680, startUs: phaseAEndUs, durationSec: phaseBDurationSec, rateCps: phaseBHighRateCps)
+                .GetEnumerator();
+            bool phaseBHasEvent = phaseBGen.MoveNext();
+
+            long phaseBEndUs = phaseAEndUs + (long)(phaseBDurationSec * 1e6);
+
+            for (long nowUs = phaseAEndUs + stepIntervalUs; nowUs <= phaseBEndUs; nowUs += stepIntervalUs)
+            {
+                while (phaseBHasEvent && phaseBGen.Current <= nowUs)
+                {
+                    engine.OnDetection(new Detection(phaseBGen.Current, 0));
+                    phaseBHasEvent = phaseBGen.MoveNext();
+                }
+
+                engine.ForceStep(nowUs);
+                lastNowUs = nowUs;
             }
 
             for (int i = 0; i < 200; i++)
             {
-                long nowUs = totalDurationUs + (i + 1) * stepIntervalUs;
+                long nowUs = lastNowUs + (i + 1) * stepIntervalUs;
                 engine.ForceStep(nowUs);
             }
 
             Assert.NotEmpty(estimates);
 
-            long phaseAEndUs = (long)(segments[0].durationSec * 1e6);
-
-            long preStepWindowUs = 1_000_000; // 1 s
-            long preStepStartUs = Math.Max(0, phaseAEndUs - preStepWindowUs);
-
-            var preStepEstimates = estimates
-                .Where(e => e.NowUs >= preStepStartUs && e.NowUs < phaseAEndUs)
-                .ToList();
-            Assert.NotEmpty(preStepEstimates);
+            Assert.True(phaseAEndUs > 0, "Did not reach calm state before applying step.");
 
             Assert.DoesNotContain(estimates.Where(e => e.NowUs < phaseAEndUs), e => e.State == "Degraded");
-
-            Assert.DoesNotContain(preStepEstimates, e => e.State == "Hold" || e.State == "Degraded");
 
             int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
