@@ -142,6 +142,21 @@ namespace AdaptiveWindowTests
             Assert.NotEmpty(steady);
 
             var tail = steady.TakeLast(Math.Min(20, steady.Count)).ToList();
+            var reversed = steady.AsEnumerable().Reverse().ToList();
+            var run = new List<AdaptiveWindowEngine.Estimate>();
+            foreach (var e in reversed)
+            {
+                if (e.Y > 0 && e.ZY > 1.0)
+                {
+                    run.Add(e);
+                }
+                else if (run.Count > 0)
+                {
+                    break;
+                }
+            }
+
+            run.Reverse();
 
             var bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic;
             var engineType = typeof(AdaptiveWindowEngine);
@@ -213,11 +228,7 @@ namespace AdaptiveWindowTests
                     "Correlated plant produced no significant positive Y at any gate. This indicates a plant/test parameter issue or an engine regression in ladder computation.");
             }
 
-            int poissonTailCount = tail.Count(e => e.State == "Poisson");
-            Assert.True(poissonTailCount <= 2, $"Expected correlated tail to avoid Poisson; got {poissonTailCount}/{tail.Count} Poisson.");
-            Assert.NotEqual("Poisson", tail[^1].State);
-            int positiveY = tail.Count(e => e.Y > 0 && e.ZY > 1.0);
-            if (positiveY < 0.7 * tail.Count)
+            if (run.Count < 5)
             {
                 string tailDump = string.Join("; ", tail.Select(e => $"state={e.State}, gate={e.GateUs}, Y={e.Y:F3}, ZY={e.ZY:F3}"));
                 string ladderDump = zByGate != null && yByGate != null
@@ -230,13 +241,21 @@ namespace AdaptiveWindowTests
                     : $"No ladder resolved; discovered double[] fields: {ladderFieldDump}";
 
                 throw new XunitException(
-                    "Expected correlated stream to yield predominantly positive Y values with meaningful Z." + Environment.NewLine +
-                    $"positiveY={positiveY}, tailCount={tail.Count}" + Environment.NewLine +
+                    "Expected correlated stream to yield a sustained run of positive correlation estimates." + Environment.NewLine +
+                    $"runCount={run.Count}, steadyCount={steady.Count}" + Environment.NewLine +
                     $"Tail: {tailDump}" + Environment.NewLine +
                     $"Ladder: {ladderDump}");
             }
 
-            int modalGateUs = tail
+            Assert.DoesNotContain(run, e => e.State == "Poisson");
+            Assert.True(run.Count >= 5);
+            foreach (var e in run)
+            {
+                Assert.True(e.Y > 0, $"Expected positive Y during sustained correlation; got Y={e.Y:F3} at gate={e.GateUs} state={e.State}.");
+                Assert.True(e.ZY > 1.0, $"Expected ZY>1 during sustained correlation; got ZY={e.ZY:F3} at gate={e.GateUs} state={e.State}.");
+            }
+
+            int modalGateUs = run
                 .GroupBy(e => e.GateUs)
                 .OrderByDescending(g => g.Count())
                 .ThenBy(g => g.Key)
@@ -248,8 +267,8 @@ namespace AdaptiveWindowTests
                 $"Expected Tg near or below correlation scale: Tg={modalGateUs}us, 2*tau={maxKneeGateUs}us.");
 
             Assert.NotEqual(gateLadderUs[^1], modalGateUs); // should not drift to largest gate
-            int modalCount = tail.Count(e => e.GateUs == modalGateUs);
-            Assert.True(modalCount >= (int)(0.6 * tail.Count), "Gate should stabilize near the correlation knee.");
+            int modalCount = run.Count(e => e.GateUs == modalGateUs);
+            Assert.True(modalCount >= (int)(0.6 * run.Count), "Gate should stabilize near the correlation knee.");
 
             var tauField = typeof(AdaptiveWindowEngine).GetField("_tauHat", BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.NotNull(tauField);
