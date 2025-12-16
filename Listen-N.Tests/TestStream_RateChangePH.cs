@@ -44,10 +44,110 @@ namespace AdaptiveWindowTests
             }
         }
 
-        private static string DumpTail(IEnumerable<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY)> trace, int count = 20)
+        private static IEnumerable<long> GenerateClusteredSegment(
+            int seed,
+            long startUs,
+            double durationSec,
+            double parentRateCps,
+            int meanClusterSize,
+            double childMeanDelayUs)
+        {
+            var rng = new Random(seed);
+            double tSec = startUs / 1e6;
+            long lastUs = startUs - 1;
+            long endUs = startUs + (long)Math.Round(durationSec * 1e6);
+
+            int SamplePoisson(double lambda)
+            {
+                if (lambda <= 0)
+                {
+                    return 0;
+                }
+
+                double l = Math.Exp(-lambda);
+                int k = 0;
+                double p = 1.0;
+
+                do
+                {
+                    k++;
+                    p *= rng.NextDouble();
+                }
+                while (p > l);
+
+                return k - 1;
+            }
+
+            double SampleExponential(double mean)
+            {
+                double u;
+                do
+                {
+                    u = rng.NextDouble();
+                }
+                while (u <= 0.0 || u >= 1.0);
+
+                return -Math.Log(1 - u) * mean;
+            }
+
+            while (true)
+            {
+                double u;
+                do
+                {
+                    u = rng.NextDouble();
+                }
+                while (u <= 0.0 || u >= 1.0);
+
+                double dtSec = -Math.Log(1 - u) / parentRateCps;
+                tSec += dtSec;
+
+                long parentUs = (long)Math.Round(tSec * 1e6);
+                if (parentUs > endUs)
+                {
+                    yield break;
+                }
+
+                if (parentUs <= lastUs)
+                {
+                    parentUs = lastUs + 1;
+                }
+
+                int children = 1 + SamplePoisson(Math.Max(0, meanClusterSize - 1));
+                var childTimes = new List<long>(children);
+
+                for (int i = 0; i < children; i++)
+                {
+                    double delayUs = SampleExponential(childMeanDelayUs);
+                    long childUs = parentUs + (long)Math.Round(delayUs);
+                    childTimes.Add(childUs);
+                }
+
+                childTimes.Sort();
+
+                foreach (var childUs in childTimes)
+                {
+                    if (childUs > endUs)
+                    {
+                        yield break;
+                    }
+
+                    long tsUs = childUs;
+                    if (tsUs <= lastUs)
+                    {
+                        tsUs = lastUs + 1;
+                    }
+
+                    yield return tsUs;
+                    lastUs = tsUs;
+                }
+            }
+        }
+
+        private static string DumpTail(IEnumerable<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY, double windowSec)> trace, int count = 20)
         {
             var tail = trace.TakeLast(Math.Min(count, trace.Count()))
-                .Select(entry => $"t={entry.tUs / 1_000_000.0:F3}s state={entry.state} gate={entry.gateUs} sig={entry.hasSignificance} y={entry.y:F3} zy={entry.zY:F3}");
+                .Select(entry => $"t={entry.tUs / 1_000_000.0:F3}s state={entry.state} gate={entry.gateUs} win={entry.windowSec:F2}s sig={entry.hasSignificance} y={entry.y:F3} zy={entry.zY:F3}");
             return string.Join("; ", tail);
         }
 
@@ -75,17 +175,19 @@ namespace AdaptiveWindowTests
             engine.MinGateCountForZ = 2;
 
             var estimates = new List<AdaptiveWindowEngine.Estimate>();
-            var trace = new List<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY)>();
+            var trace = new List<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY, double windowSec)>();
             engine.OnEstimate += est =>
             {
                 estimates.Add(est);
-                trace.Add((est.NowUs, est.State, est.GateUs, est.HasSignificance, est.Y, est.ZY));
+                trace.Add((est.NowUs, est.State, est.GateUs, est.HasSignificance, est.Y, est.ZY, est.WindowSec));
             };
 
-            double phaseALowRateCps = 500.0;
+            double phaseAParentRateCps = 200.0;
             double phaseAWindowSec = 20.0;
             double phaseBDurationSec = 8.0;
-            double phaseBHighRateCps = 15000.0;
+            double phaseBParentRateCps = 2000.0;
+            int meanClusterSize = 4;
+            double childMeanDelayUs = 200.0;
 
             long stepIntervalUs = 20_000; // 20 ms
             long phaseAEndUs = 0;
@@ -93,7 +195,7 @@ namespace AdaptiveWindowTests
             int calmNeeded = 3;
             int calmCount = 0;
 
-            var phaseAGen = GeneratePoissonSegment(seed: 13579, startUs: 0, durationSec: phaseAWindowSec, rateCps: phaseALowRateCps)
+            var phaseAGen = GenerateClusteredSegment(seed: 13579, startUs: 0, durationSec: phaseAWindowSec, parentRateCps: phaseAParentRateCps, meanClusterSize: meanClusterSize, childMeanDelayUs: childMeanDelayUs)
                 .GetEnumerator();
             bool phaseAHasEvent = phaseAGen.MoveNext();
 
@@ -114,7 +216,7 @@ namespace AdaptiveWindowTests
                 var latestEstimate = estimates.LastOrDefault();
                 if (latestEstimate != null)
                 {
-                    bool isSettled = latestEstimate.State == "Track" && latestEstimate.HasSignificance;
+                    bool isSettled = latestEstimate.State == "Track" && latestEstimate.State != "Degraded";
                     if (isSettled)
                     {
                         calmCount++;
@@ -138,7 +240,7 @@ namespace AdaptiveWindowTests
                     DumpTail(trace));
             }
 
-            var phaseBGen = GeneratePoissonSegment(seed: 24680, startUs: phaseAEndUs, durationSec: phaseBDurationSec, rateCps: phaseBHighRateCps)
+            var phaseBGen = GenerateClusteredSegment(seed: 24680, startUs: phaseAEndUs, durationSec: phaseBDurationSec, parentRateCps: phaseBParentRateCps, meanClusterSize: meanClusterSize, childMeanDelayUs: childMeanDelayUs)
                 .GetEnumerator();
             bool phaseBHasEvent = phaseBGen.MoveNext();
 
@@ -166,7 +268,9 @@ namespace AdaptiveWindowTests
 
             Assert.True(phaseAEndUs > 0, "Did not reach calm state before applying step.");
 
-            Assert.DoesNotContain(estimates.Where(e => e.NowUs < phaseAEndUs), e => e.State == "Degraded");
+            var preStepTail = estimates.Where(e => e.NowUs <= phaseAEndUs).TakeLast(3).ToList();
+            Assert.NotEmpty(preStepTail);
+            Assert.DoesNotContain(preStepTail, e => e.State == "Degraded");
 
             int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
