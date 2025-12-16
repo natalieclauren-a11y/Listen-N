@@ -152,7 +152,7 @@ namespace AdaptiveWindowTests
         }
 
         [Fact]
-        public void RateStep_PHTriggersHold_PersistsAcrossTicks()
+        public void RateStep_TriggersPromptContract_ThenReturnsToTrack()
         {
             var gateLadderUs = new[] { 500, 1000, 2000, 4000 };
 
@@ -283,6 +283,164 @@ namespace AdaptiveWindowTests
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
 
             int maxEstimatesAfterStep = 10;
+            int firstContractIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Contract");
+            bool contractSoonEnough = firstContractIndex >= 0 && (firstContractIndex - firstPhaseBIndex) <= maxEstimatesAfterStep;
+
+            if (!contractSoonEnough)
+            {
+                var statesAfterStep = string.Join("; ", estimates
+                    .Skip(firstPhaseBIndex)
+                    .Take(8)
+                    .Select(e => $"t={e.NowUs} state={e.State}"));
+
+                throw new XunitException(
+                    "Expected Contract entry shortly after rate step." + Environment.NewLine +
+                    $"stepStartUs={stepStartUs} statesAfterStep=[{statesAfterStep}]" + Environment.NewLine +
+                    DumpTail(trace));
+            }
+
+            long maxReturnUs = 30_000_000;
+            int trackAfterContractIndex = estimates.FindIndex(firstContractIndex, e => e.State == "Track");
+
+            if (trackAfterContractIndex < 0 || estimates[trackAfterContractIndex].NowUs - stepStartUs > maxReturnUs)
+            {
+                throw new XunitException(
+                    "Expected engine to return to Track after quiet horizon." + Environment.NewLine +
+                    DumpTail(trace));
+            }
+        }
+
+        [Fact]
+        public void CorrelationStep_TriggersHold_ViaPageHinkleyZY()
+        {
+            var gateLadderUs = new[] { 500, 1000, 2000, 4000 };
+
+            using var engine = new AdaptiveWindowEngine(
+                baseDeltaUs: 50,
+                gateLadderUs: gateLadderUs,
+                windowStartSec: 1.0,
+                windowMinSec: 1.0,
+                windowMaxSec: 6.0,
+                zMin: 1,
+                epsY: 0.20,
+                epsM1: 0.10,
+                startWorker: false,
+                enableFileLog: false);
+
+            engine.Beta = 0.10;
+            engine.ZPoisson = 4.0;
+            engine.ZTrack = 4.0;
+            engine.ZHold = 6.0;
+            engine.MinGateCountForZ = 2;
+
+            var estimates = new List<AdaptiveWindowEngine.Estimate>();
+            var trace = new List<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY, double windowSec)>();
+            engine.OnEstimate += est =>
+            {
+                estimates.Add(est);
+                trace.Add((est.NowUs, est.State, est.GateUs, est.HasSignificance, est.Y, est.ZY, est.WindowSec));
+            };
+
+            double parentRateCps = 500.0;
+            double phaseAWindowSec = 20.0;
+            double phaseBDurationSec = 12.0;
+            int phaseBMeanClusterSize = 6;
+            double phaseBChildMeanDelayUs = 200.0;
+
+            long stepIntervalUs = 20_000; // 20 ms
+            long phaseAEndUs = 0;
+
+            int calmNeeded = 2;
+            int calmCount = 0;
+
+            var phaseAGen = GeneratePoissonSegment(seed: 223344, startUs: 0, durationSec: phaseAWindowSec, rateCps: parentRateCps)
+                .GetEnumerator();
+            bool phaseAHasEvent = phaseAGen.MoveNext();
+
+            long phaseAWindowEndUs = (long)(phaseAWindowSec * 1e6);
+            long lastNowUs = 0;
+
+            for (long nowUs = stepIntervalUs; nowUs <= phaseAWindowEndUs; nowUs += stepIntervalUs)
+            {
+                while (phaseAHasEvent && phaseAGen.Current <= nowUs)
+                {
+                    engine.OnDetection(new Detection(phaseAGen.Current, 0));
+                    phaseAHasEvent = phaseAGen.MoveNext();
+                }
+
+                int prevCount = estimates.Count;
+                engine.ForceStep(nowUs);
+                lastNowUs = nowUs;
+
+                if (estimates.Count > prevCount)
+                {
+                    var latestEstimate = estimates[^1];
+
+                    bool isSettled = latestEstimate.State == "Track";
+                    if (isSettled)
+                    {
+                        calmCount++;
+                        if (calmCount >= calmNeeded)
+                        {
+                            phaseAEndUs = latestEstimate.NowUs;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        calmCount = 0;
+                    }
+                }
+            }
+
+            if (phaseAEndUs == 0)
+            {
+                throw new XunitException(
+                    "Did not reach calm state before applying correlation step." + Environment.NewLine +
+                    DumpTail(trace));
+            }
+
+            long stepStartUs = phaseAEndUs + stepIntervalUs;
+
+            var phaseBGen = GenerateClusteredSegment(seed: 445566, startUs: phaseAEndUs, durationSec: phaseBDurationSec, parentRateCps: parentRateCps, meanClusterSize: phaseBMeanClusterSize, childMeanDelayUs: phaseBChildMeanDelayUs)
+                .GetEnumerator();
+            bool phaseBHasEvent = phaseBGen.MoveNext();
+
+            long phaseBEndUs = phaseAEndUs + (long)(phaseBDurationSec * 1e6);
+
+            for (long nowUs = phaseAEndUs + stepIntervalUs; nowUs <= phaseBEndUs; nowUs += stepIntervalUs)
+            {
+                while (phaseBHasEvent && phaseBGen.Current <= nowUs)
+                {
+                    engine.OnDetection(new Detection(phaseBGen.Current, 0));
+                    phaseBHasEvent = phaseBGen.MoveNext();
+                }
+
+                engine.ForceStep(nowUs);
+                lastNowUs = nowUs;
+            }
+
+            for (int i = 0; i < 2000; i++)
+            {
+                long nowUs = lastNowUs + (i + 1) * stepIntervalUs;
+                engine.ForceStep(nowUs);
+            }
+
+            Assert.NotEmpty(estimates);
+
+            Assert.True(phaseAEndUs > 0, "Did not reach calm state before applying correlation step.");
+
+            var preStepTail = estimates.Where(e => e.NowUs <= phaseAEndUs).TakeLast(3).ToList();
+            Assert.NotEmpty(preStepTail);
+
+            var preStep = estimates.Last(e => e.NowUs <= phaseAEndUs);
+            Assert.Equal("Track", preStep.State);
+            Assert.NotEqual("Degraded", preStep.State);
+
+            int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= stepStartUs);
+            Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
+
+            int maxEstimatesAfterStep = 10;
             long maxUsAfterStep = 6_000_000;
 
             int firstHoldIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Hold");
@@ -299,7 +457,7 @@ namespace AdaptiveWindowTests
                     .Select(e => $"t={e.NowUs} state={e.State}"));
 
                 throw new XunitException(
-                    "Expected Hold entry shortly after rate step." + Environment.NewLine +
+                    "Expected Hold entry shortly after correlation step." + Environment.NewLine +
                     $"stepStartUs={stepStartUs} statesAfterStep=[{statesAfterStep}]" + Environment.NewLine +
                     DumpTail(trace));
             }
@@ -311,12 +469,12 @@ namespace AdaptiveWindowTests
 
             long firstHoldNowUs = estimates[firstHoldIndex].NowUs;
 
-            int degradedAfterStep = estimates.FindIndex(firstHoldIndex, e => e.State == "Degraded");
+            int degradedAfterHoldIndex = estimates.FindIndex(firstHoldIndex, e => e.State == "Degraded");
             int trackAfterHoldIndex = estimates.FindIndex(firstHoldIndex, e => e.State == "Track");
 
-            if (degradedAfterStep >= 0 && (trackAfterHoldIndex < 0 || degradedAfterStep < trackAfterHoldIndex))
+            if (degradedAfterHoldIndex >= 0 && (trackAfterHoldIndex < 0 || degradedAfterHoldIndex < trackAfterHoldIndex))
             {
-                if (!(degradedAfterStep + 1 < estimates.Count && estimates[degradedAfterStep + 1].State == "Degraded"))
+                if (!(degradedAfterHoldIndex + 1 < estimates.Count && estimates[degradedAfterHoldIndex + 1].State == "Degraded"))
                 {
                     throw new XunitException(
                         "Degraded should persist across multiple estimate ticks after safety preemption." + Environment.NewLine +
@@ -326,7 +484,7 @@ namespace AdaptiveWindowTests
                 return;
             }
 
-            if (trackAfterHoldIndex < 0 || estimates[trackAfterHoldIndex].NowUs - firstHoldNowUs > 30_000_000)
+            if (trackAfterHoldIndex < 0 || estimates[trackAfterHoldIndex].NowUs - stepStartUs > 30_000_000)
             {
                 throw new XunitException(
                     "Expected engine to return to Track after quiet horizon." + Environment.NewLine +
@@ -335,7 +493,7 @@ namespace AdaptiveWindowTests
         }
 
         [Fact]
-        public void RateStep_ExtremeTransient_CanEnterDegraded_AndPreemptsTrackRecovery()
+        public void RateStep_ExtremeTransient_EntersDegraded()
         {
             var gateLadderUs = new[] { 500, 1000, 2000, 4000 };
 
