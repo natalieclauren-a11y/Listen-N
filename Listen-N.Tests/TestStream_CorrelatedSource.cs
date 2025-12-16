@@ -18,7 +18,7 @@ namespace AdaptiveWindowTests
         {
             var rng = new Random(seed);
             double tSec = 0.0;
-            long lastUs = -1;
+            long lastPrimaryUs = -1;
             var timestamps = new List<long>();
 
             while (tSec < durationSec)
@@ -38,13 +38,13 @@ namespace AdaptiveWindowTests
                 }
 
                 long primaryUs = (long)Math.Round(tSec * 1e6);
-                if (primaryUs <= lastUs)
+                if (primaryUs <= lastPrimaryUs)
                 {
-                    primaryUs = lastUs + 1;
+                    primaryUs = lastPrimaryUs + 1;
                 }
 
                 timestamps.Add(primaryUs);
-                lastUs = primaryUs;
+                lastPrimaryUs = primaryUs;
 
                 if (rng.NextDouble() <= pairFraction)
                 {
@@ -60,19 +60,15 @@ namespace AdaptiveWindowTests
 
                         dtPairSec = -Math.Log(1 - v) * tauSec;
                     }
-                    while (dtPairSec > 4.0 * tauSec);
+                    while (dtPairSec < 0.1 * tauSec || dtPairSec > 4.0 * tauSec);
 
                     double pairedEventSec = tSec + dtPairSec;
                     if (pairedEventSec <= durationSec)
                     {
-                        long pairedUs = (long)Math.Round(pairedEventSec * 1e6);
-                        if (pairedUs <= lastUs)
-                        {
-                            pairedUs = lastUs + 1;
-                        }
+                        long dtPairUs = Math.Max(1L, (long)Math.Round(dtPairSec * 1e6));
+                        long pairedUs = primaryUs + dtPairUs;
 
                         timestamps.Add(pairedUs);
-                        lastUs = pairedUs;
                     }
                 }
             }
@@ -173,7 +169,7 @@ namespace AdaptiveWindowTests
             Assert.True(double.IsFinite(tauHatSec) && tauHatSec > 0, "Tau estimate should be finite and positive.");
 
             double relativeError = Math.Abs(tauHatSec - tauSec) / tauSec;
-            Assert.True(relativeError < 0.6, $"Tau estimate should recover the planted correlation time. tau_hat={tauHatSec:0.###}s");
+            Assert.True(relativeError < 0.6, $"Tau estimate should recover the planted correlation time. tau_hat={tauHatSec:E3}s");
         }
     }
 }
