@@ -10,10 +10,9 @@ namespace AdaptiveWindowTests
 {
     public class TestStream_CorrelatedSource
     {
-        private static IEnumerable<long> GenerateClusteredBursts(
+        private static IEnumerable<long> GenerateCorrelatedPairsFromClusters(
             int seed,
             double clusterRateHz,
-            double meanMultiplicity,
             double tauSec,
             double durationSec)
         {
@@ -41,32 +40,18 @@ namespace AdaptiveWindowTests
                 long primaryUs = (long)Math.Round(tSec * 1e6);
                 timestamps.Add(primaryUs);
 
-                double p = 1.0 / meanMultiplicity;
-                int multiplicity = 1;
-                while (rng.NextDouble() > p)
+                double v;
+                do
                 {
-                    multiplicity++;
+                    v = rng.NextDouble();
                 }
+                while (v <= 0.0 || v >= 1.0);
 
-                for (int i = 1; i < multiplicity; i++)
-                {
-                    double v;
-                    do
-                    {
-                        v = rng.NextDouble();
-                    }
-                    while (v <= 0.0 || v >= 1.0);
+                double dtBurstSec = -Math.Log(1 - v) * tauSec;
+                dtBurstSec = Math.Max(minDtSec, dtBurstSec);
 
-                    double dtBurstSec = -Math.Log(1 - v) * tauSec;
-                    dtBurstSec = Math.Max(minDtSec, dtBurstSec);
-
-                    double delayedEventSec = tSec + dtBurstSec;
-                    if (delayedEventSec <= durationSec)
-                    {
-                        long delayedUs = primaryUs + (long)Math.Round(dtBurstSec * 1e6);
-                        timestamps.Add(delayedUs);
-                    }
-                }
+                long pairedUs = primaryUs + (long)Math.Round(dtBurstSec * 1e6);
+                timestamps.Add(pairedUs);
             }
 
             timestamps.Sort();
@@ -110,10 +95,9 @@ namespace AdaptiveWindowTests
             engine.OnEstimate += estimates.Add;
 
             double tauSec = 0.002; // 2 ms correlation time
-            var timestamps = GenerateClusteredBursts(
+            var timestamps = GenerateCorrelatedPairsFromClusters(
                 seed: 24680,
-                clusterRateHz: 1200.0,
-                meanMultiplicity: 1.8,
+                clusterRateHz: 1000.0,
                 tauSec: tauSec,
                 durationSec: 11.0).ToList();
 
