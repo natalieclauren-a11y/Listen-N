@@ -63,13 +63,14 @@ namespace AdaptiveWindowTests
                 gateLadderUs: gateLadderUs,
                 windowStartSec: 1.0,
                 windowMinSec: 1.0,
-                windowMaxSec: 40.0,
+                windowMaxSec: 6.0,
                 zMin: 1,
-                epsY: 0.10,
-                epsM1: 0.02,
+                epsY: 0.20,
+                epsM1: 0.10,
                 startWorker: false,
                 enableFileLog: false);
 
+            engine.Beta = 0.10;
             engine.ZPoisson = 4.0;
             engine.ZTrack = 4.0;
             engine.ZHold = 6.0;
@@ -85,9 +86,9 @@ namespace AdaptiveWindowTests
 
             var segments = new[]
             {
-                (durationSec: 6.0, rateCps: 50.0),
-                (durationSec: 6.0, rateCps: 2000.0),
-                (durationSec: 8.0, rateCps: 2000.0)
+                (durationSec: 4.0, rateCps: 500.0),
+                (durationSec: 6.0, rateCps: 5000.0),
+                (durationSec: 10.0, rateCps: 5000.0)
             };
 
             var timestamps = GeneratePiecewisePoisson(seed: 13579, segments: segments).ToList();
@@ -128,7 +129,7 @@ namespace AdaptiveWindowTests
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
 
             int firstHoldIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Hold");
-            if (firstHoldIndex < 0 || firstHoldIndex - firstPhaseBIndex > 50)
+            if (firstHoldIndex < 0 || estimates[firstHoldIndex].NowUs - phaseAEndUs > 2_000_000)
             {
                 throw new XunitException(
                     "Expected Hold entry shortly after rate step." + Environment.NewLine +
@@ -140,8 +141,10 @@ namespace AdaptiveWindowTests
                 estimates[firstHoldIndex + 1].State == "Hold",
                 "Hold should persist across multiple estimate ticks.");
 
+            long firstHoldNowUs = estimates[firstHoldIndex].NowUs;
+
             int trackAfterHoldIndex = estimates.FindIndex(firstHoldIndex, e => e.State == "Track");
-            if (trackAfterHoldIndex < 0 || trackAfterHoldIndex - firstHoldIndex > 200)
+            if (trackAfterHoldIndex < 0 || estimates[trackAfterHoldIndex].NowUs - firstHoldNowUs > 30_000_000)
             {
                 throw new XunitException(
                     "Expected engine to return to Track after quiet horizon." + Environment.NewLine +
