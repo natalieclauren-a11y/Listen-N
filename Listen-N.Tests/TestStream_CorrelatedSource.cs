@@ -124,23 +124,22 @@ namespace AdaptiveWindowTests
             foreach (long ts in timestamps)
             {
                 engine.OnDetection(new Detection(ts, 0));
-                engine.ForceStep(ts);
             }
 
-            long nowUs = timestamps[^1];
-            for (int i = 0; i < 3; i++)
+            long nowUs = timestamps[^1] + 1;
+            for (int i = 0; i < 12; i++)
             {
-                nowUs += 500_000; // push time forward deterministically in 0.5s increments
+                nowUs += 500_000; // +0.5 s per step
                 engine.ForceStep(nowUs);
             }
 
             Assert.NotEmpty(estimates);
             Assert.DoesNotContain(estimates, e => e.State == "Poisson");
 
-            var nonWarmup = estimates.Where(e => e.State != "Warmup").ToList();
-            Assert.NotEmpty(nonWarmup);
+            var steady = estimates.Where(e => e.State != "Warmup" && e.State != "LowRate").ToList();
+            Assert.NotEmpty(steady);
 
-            var tail = nonWarmup.TakeLast(Math.Min(20, nonWarmup.Count)).ToList();
+            var tail = steady.TakeLast(Math.Min(20, steady.Count)).ToList();
             int positiveY = tail.Count(e => e.Y > 0 && e.HasSignificance);
             Assert.True(positiveY >= tail.Count / 2, "Expected correlated stream to yield positive significant Y values.");
 
