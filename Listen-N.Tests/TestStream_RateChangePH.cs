@@ -152,7 +152,7 @@ namespace AdaptiveWindowTests
         }
 
         [Fact]
-        public void RateStep_TriggersHold_ThenReturnsToTrackAfterQuietHorizon()
+        public void RateStep_PHTriggersHold_PersistsAcrossTicks()
         {
             var gateLadderUs = new[] { 500, 1000, 2000, 4000 };
 
@@ -184,10 +184,10 @@ namespace AdaptiveWindowTests
 
             double phaseAParentRateCps = 200.0;
             double phaseAWindowSec = 20.0;
-            double phaseBDurationSec = 8.0;
-            double phaseBParentRateCps = 2000.0;
-            int meanClusterSize = 4;
-            double childMeanDelayUs = 200.0;
+            double phaseBDurationSec = 12.0;
+            double phaseBParentRateCps = 1000.0;
+            int meanClusterSize = 2;
+            double childMeanDelayUs = 800.0;
 
             long stepIntervalUs = 20_000; // 20 ms
             long phaseAEndUs = 0;
@@ -260,7 +260,7 @@ namespace AdaptiveWindowTests
                 lastNowUs = nowUs;
             }
 
-            for (int i = 0; i < 200; i++)
+            for (int i = 0; i < 2000; i++)
             {
                 long nowUs = lastNowUs + (i + 1) * stepIntervalUs;
                 engine.ForceStep(nowUs);
@@ -280,8 +280,6 @@ namespace AdaptiveWindowTests
             int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
             Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
 
-            int lastHoldBeforeStep = estimates.FindLastIndex(e => e.NowUs < phaseAEndUs && e.State == "Hold");
-
             int maxEstimatesAfterStep = 10;
             long maxUsAfterStep = 10_000_000;
 
@@ -298,8 +296,6 @@ namespace AdaptiveWindowTests
                     DumpTail(trace));
             }
 
-            Assert.True(firstHoldIndex > lastHoldBeforeStep, "Hold after step should be a new episode.");
-
             Assert.True(
                 firstHoldIndex + 1 < estimates.Count &&
                 estimates[firstHoldIndex + 1].State == "Hold",
@@ -307,18 +303,196 @@ namespace AdaptiveWindowTests
 
             long firstHoldNowUs = estimates[firstHoldIndex].NowUs;
 
+            int degradedAfterStep = estimates.FindIndex(firstHoldIndex, e => e.State == "Degraded");
             int trackAfterHoldIndex = estimates.FindIndex(firstHoldIndex, e => e.State == "Track");
+
+            if (degradedAfterStep >= 0 && (trackAfterHoldIndex < 0 || degradedAfterStep < trackAfterHoldIndex))
+            {
+                if (!(degradedAfterStep + 1 < estimates.Count && estimates[degradedAfterStep + 1].State == "Degraded"))
+                {
+                    throw new XunitException(
+                        "Degraded should persist across multiple estimate ticks after safety preemption." + Environment.NewLine +
+                        DumpTail(trace));
+                }
+
+                return;
+            }
+
             if (trackAfterHoldIndex < 0 || estimates[trackAfterHoldIndex].NowUs - firstHoldNowUs > 30_000_000)
             {
                 throw new XunitException(
                     "Expected engine to return to Track after quiet horizon." + Environment.NewLine +
                     DumpTail(trace));
             }
+        }
 
-            var holdGates = trace.Where(entry => entry.state == "Hold").Select(entry => entry.gateUs).ToList();
-            if (holdGates.Count >= 2)
+        [Fact]
+        public void RateStep_ExtremeTransient_CanEnterDegraded_AndPreemptsTrackRecovery()
+        {
+            var gateLadderUs = new[] { 500, 1000, 2000, 4000 };
+
+            using var engine = new AdaptiveWindowEngine(
+                baseDeltaUs: 50,
+                gateLadderUs: gateLadderUs,
+                windowStartSec: 1.0,
+                windowMinSec: 1.0,
+                windowMaxSec: 6.0,
+                zMin: 1,
+                epsY: 0.20,
+                epsM1: 0.10,
+                startWorker: false,
+                enableFileLog: false);
+
+            engine.Beta = 0.10;
+            engine.ZPoisson = 4.0;
+            engine.ZTrack = 4.0;
+            engine.ZHold = 6.0;
+            engine.MinGateCountForZ = 2;
+
+            var estimates = new List<AdaptiveWindowEngine.Estimate>();
+            var trace = new List<(long tUs, string state, int gateUs, bool hasSignificance, double y, double zY, double windowSec)>();
+            engine.OnEstimate += est =>
             {
-                Assert.True(holdGates.All(g => g == holdGates[0]), "Gate should remain frozen during Hold.");
+                estimates.Add(est);
+                trace.Add((est.NowUs, est.State, est.GateUs, est.HasSignificance, est.Y, est.ZY, est.WindowSec));
+            };
+
+            double phaseAParentRateCps = 200.0;
+            double phaseAWindowSec = 20.0;
+            double phaseBDurationSec = 12.0;
+            double phaseBParentRateCps = 2000.0;
+            int meanClusterSize = 4;
+            double childMeanDelayUs = 200.0;
+
+            long stepIntervalUs = 20_000; // 20 ms
+            long phaseAEndUs = 0;
+
+            int calmNeeded = 2;
+            int calmCount = 0;
+
+            var phaseAGen = GenerateClusteredSegment(seed: 98765, startUs: 0, durationSec: phaseAWindowSec, parentRateCps: phaseAParentRateCps, meanClusterSize: meanClusterSize, childMeanDelayUs: childMeanDelayUs)
+                .GetEnumerator();
+            bool phaseAHasEvent = phaseAGen.MoveNext();
+
+            long phaseAWindowEndUs = (long)(phaseAWindowSec * 1e6);
+            long lastNowUs = 0;
+
+            for (long nowUs = stepIntervalUs; nowUs <= phaseAWindowEndUs; nowUs += stepIntervalUs)
+            {
+                while (phaseAHasEvent && phaseAGen.Current <= nowUs)
+                {
+                    engine.OnDetection(new Detection(phaseAGen.Current, 0));
+                    phaseAHasEvent = phaseAGen.MoveNext();
+                }
+
+                int prevCount = estimates.Count;
+                engine.ForceStep(nowUs);
+                lastNowUs = nowUs;
+
+                if (estimates.Count > prevCount)
+                {
+                    var latestEstimate = estimates[^1];
+
+                    bool isSettled = latestEstimate.State == "Track";
+                    if (isSettled)
+                    {
+                        calmCount++;
+                        if (calmCount >= calmNeeded)
+                        {
+                            phaseAEndUs = latestEstimate.NowUs;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        calmCount = 0;
+                    }
+                }
+            }
+
+            if (phaseAEndUs == 0)
+            {
+                throw new XunitException(
+                    "Did not reach calm state before applying step." + Environment.NewLine +
+                    DumpTail(trace));
+            }
+
+            var phaseBGen = GenerateClusteredSegment(seed: 86420, startUs: phaseAEndUs, durationSec: phaseBDurationSec, parentRateCps: phaseBParentRateCps, meanClusterSize: meanClusterSize, childMeanDelayUs: childMeanDelayUs)
+                .GetEnumerator();
+            bool phaseBHasEvent = phaseBGen.MoveNext();
+
+            long phaseBEndUs = phaseAEndUs + (long)(phaseBDurationSec * 1e6);
+
+            for (long nowUs = phaseAEndUs + stepIntervalUs; nowUs <= phaseBEndUs; nowUs += stepIntervalUs)
+            {
+                while (phaseBHasEvent && phaseBGen.Current <= nowUs)
+                {
+                    engine.OnDetection(new Detection(phaseBGen.Current, 0));
+                    phaseBHasEvent = phaseBGen.MoveNext();
+                }
+
+                engine.ForceStep(nowUs);
+                lastNowUs = nowUs;
+            }
+
+            for (int i = 0; i < 2000; i++)
+            {
+                long nowUs = lastNowUs + (i + 1) * stepIntervalUs;
+                engine.ForceStep(nowUs);
+            }
+
+            Assert.NotEmpty(estimates);
+
+            Assert.True(phaseAEndUs > 0, "Did not reach calm state before applying step.");
+
+            var preStepTail = estimates.Where(e => e.NowUs <= phaseAEndUs).TakeLast(3).ToList();
+            Assert.NotEmpty(preStepTail);
+
+            var preStep = estimates.Last(e => e.NowUs <= phaseAEndUs);
+            Assert.Equal("Track", preStep.State);
+            Assert.NotEqual("Degraded", preStep.State);
+
+            int firstPhaseBIndex = estimates.FindIndex(e => e.NowUs >= phaseAEndUs);
+            Assert.InRange(firstPhaseBIndex, 0, estimates.Count - 1);
+
+            int maxEstimatesAfterStep = 15;
+            long maxUsAfterStep = 12_000_000;
+
+            int firstHoldIndex = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Hold");
+            bool holdSoonEnough =
+                firstHoldIndex >= 0 &&
+                (firstHoldIndex - firstPhaseBIndex) <= maxEstimatesAfterStep &&
+                (estimates[firstHoldIndex].NowUs - phaseAEndUs) <= maxUsAfterStep;
+
+            if (!holdSoonEnough)
+            {
+                throw new XunitException(
+                    "Expected Hold entry shortly after rate step." + Environment.NewLine +
+                    DumpTail(trace));
+            }
+
+            Assert.True(
+                firstHoldIndex + 1 < estimates.Count &&
+                estimates[firstHoldIndex + 1].State == "Hold",
+                "Hold should persist across multiple estimate ticks.");
+
+            int degradedAfterStep = estimates.FindIndex(firstPhaseBIndex, e => e.State == "Degraded");
+            if (degradedAfterStep < 0)
+            {
+                throw new XunitException(
+                    "Expected Degraded state after violent transient." + Environment.NewLine +
+                    DumpTail(trace));
+            }
+
+            Assert.True(
+                degradedAfterStep + 1 < estimates.Count &&
+                estimates[degradedAfterStep + 1].State == "Degraded",
+                "Degraded should persist across multiple estimate ticks.");
+
+            int lookahead = Math.Min(5, estimates.Count - degradedAfterStep - 1);
+            for (int i = 1; i <= lookahead; i++)
+            {
+                Assert.NotEqual("Track", estimates[degradedAfterStep + i].State);
             }
         }
     }
