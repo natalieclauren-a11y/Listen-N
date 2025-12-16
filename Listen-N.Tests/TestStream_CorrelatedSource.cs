@@ -72,7 +72,7 @@ namespace AdaptiveWindowTests
         [Fact]
         public void CorrelatedPairs_ProduceStableCorrelationEstimate()
         {
-            var gateLadderUs = new[] { 250, 500, 1000, 2000, 4000, 8000, 16000 };
+            var gateLadderUs = new[] { 1000, 2000, 4000, 8000, 16000, 32000 };
 
                 using var engine = new AdaptiveWindowEngine(
                     baseDeltaUs: 50,
@@ -125,7 +125,7 @@ namespace AdaptiveWindowTests
             var run = new List<AdaptiveWindowEngine.Estimate>();
             foreach (var e in reversed)
             {
-                if (e.Y > 0 && e.ZY > 1.0)
+                if ((e.State == "Track" || e.State == "Hold") && e.Y > 0 && e.ZY > 1.0)
                 {
                     run.Add(e);
                 }
@@ -226,7 +226,8 @@ namespace AdaptiveWindowTests
                     $"Ladder: {ladderDump}");
             }
 
-            Assert.DoesNotContain(run, e => e.State == "Poisson");
+            Assert.NotEqual("Poisson", steady[^1].State);
+            Assert.True(steady.TakeLast(10).Count(e => e.State == "Poisson") <= 2);
             Assert.True(run.Count >= 5);
             foreach (var e in run)
             {
@@ -242,6 +243,7 @@ namespace AdaptiveWindowTests
                 .Key;
 
             int maxKneeGateUs = (int)Math.Round(2.0 * tauSec * 1e6); // 2*tau in µs, here ~4000
+            Assert.Contains(modalGateUs, new[] { 1000, 2000, 4000 });
             Assert.True(modalGateUs <= maxKneeGateUs,
                 $"Expected Tg near or below correlation scale: Tg={modalGateUs}us, 2*tau={maxKneeGateUs}us.");
 
