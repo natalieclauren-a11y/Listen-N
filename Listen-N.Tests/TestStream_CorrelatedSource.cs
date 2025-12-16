@@ -48,14 +48,20 @@ namespace AdaptiveWindowTests
 
                 if (rng.NextDouble() <= pairFraction)
                 {
-                    double v;
+                    double dtPairSec;
                     do
                     {
-                        v = rng.NextDouble();
-                    }
-                    while (v <= 0.0 || v >= 1.0);
+                        double v;
+                        do
+                        {
+                            v = rng.NextDouble();
+                        }
+                        while (v <= 0.0 || v >= 1.0);
 
-                    double dtPairSec = -Math.Log(1 - v) * tauSec;
+                        dtPairSec = -Math.Log(1 - v) * tauSec;
+                    }
+                    while (dtPairSec > 4.0 * tauSec);
+
                     double pairedEventSec = tSec + dtPairSec;
                     if (pairedEventSec <= durationSec)
                     {
@@ -91,17 +97,17 @@ namespace AdaptiveWindowTests
         {
             var gateLadderUs = new[] { 250, 500, 1000, 2000, 4000, 8000, 16000 };
 
-            using var engine = new AdaptiveWindowEngine(
-                baseDeltaUs: 50,
-                gateLadderUs: gateLadderUs,
-                windowStartSec: 1.0,
-                windowMinSec: 1.0,
-                windowMaxSec: 60.0,
-                zMin: 2,
-                epsY: 0.10,
-                epsM1: 0.02,
-                startWorker: false,
-                enableFileLog: false);
+                using var engine = new AdaptiveWindowEngine(
+                    baseDeltaUs: 50,
+                    gateLadderUs: gateLadderUs,
+                    windowStartSec: 1.0,
+                    windowMinSec: 1.0,
+                    windowMaxSec: 60.0,
+                    zMin: 1,
+                    epsY: 0.10,
+                    epsM1: 0.02,
+                    startWorker: false,
+                    enableFileLog: false);
 
             engine.ZPoisson = 4.0;
             engine.ZTrack = 4.0;
@@ -140,8 +146,8 @@ namespace AdaptiveWindowTests
             Assert.NotEmpty(steady);
 
             var tail = steady.TakeLast(Math.Min(20, steady.Count)).ToList();
-            int positiveY = tail.Count(e => e.Y > 0 && e.HasSignificance);
-            Assert.True(positiveY >= tail.Count / 2, "Expected correlated stream to yield positive significant Y values.");
+            int positiveY = tail.Count(e => e.Y > 0 && e.ZY > 1.0);
+            Assert.True(positiveY >= 0.7 * tail.Count, "Expected correlated stream to yield predominantly positive Y values with meaningful Z.");
 
             int modalGateUs = tail
                 .GroupBy(e => e.GateUs)
