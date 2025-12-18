@@ -5,6 +5,8 @@ using System.Linq;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Trainers;
+using Microsoft.ML.Trainers.FastTree;
+
 
 namespace Localization.ML;
 
@@ -28,7 +30,8 @@ public sealed class ModelTrainer
         var trainData = _mlContext.Data.LoadFromEnumerable(split.Train);
         var testData = _mlContext.Data.LoadFromEnumerable(split.Test);
 
-        var pipeline = _mlContext.BinaryClassification.Trainers.FastForest(new FastForestBinaryTrainer.Options
+        var pipeline = _mlContext.BinaryClassification.Trainers.FastForest(new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
+
         {
             NumberOfTrees = 200,
             NumberOfLeaves = 64,
@@ -51,11 +54,27 @@ public sealed class ModelTrainer
     public (double Mean, double Std) CrossValidateClassifier(IReadOnlyList<ClassificationExample> data)
     {
         var dataView = _mlContext.Data.LoadFromEnumerable(data);
-        var results = _mlContext.BinaryClassification.CrossValidate(dataView, pipeline: _mlContext.BinaryClassification.Trainers.FastForest(), numberOfFolds: 5);
+
+        var estimator = _mlContext.BinaryClassification.Trainers.FastForest(
+            new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
+            {
+                NumberOfTrees = 200,
+                NumberOfLeaves = 64,
+                LabelColumnName = nameof(ClassificationExample.Label),
+                FeatureColumnName = nameof(ClassificationExample.Features)
+            });
+
+        var results = _mlContext.BinaryClassification.CrossValidate(
+            data: dataView,
+            estimator: estimator,
+            numberOfFolds: 5,
+            labelColumnName: nameof(ClassificationExample.Label));
+
         double mean = results.Average(r => r.Metrics.Accuracy);
         double std = Math.Sqrt(results.Average(r => Math.Pow(r.Metrics.Accuracy - mean, 2)));
         return (mean, std);
     }
+
 
     public double RandomLabelSanityCheck(IReadOnlyList<ClassificationExample> data)
     {
@@ -74,7 +93,8 @@ public sealed class ModelTrainer
     {
         var data = rows.Select(r => new RegressionExample { Features = r.Features, Label = r.Label });
         var dataView = _mlContext.Data.LoadFromEnumerable(data);
-        var pipeline = _mlContext.Regression.Trainers.FastForest(new FastForestRegressionTrainer.Options
+        var pipeline = _mlContext.Regression.Trainers.FastForest(new Microsoft.ML.Trainers.FastTree.FastForestRegressionTrainer.Options
+
         {
             NumberOfTrees = 200,
             NumberOfLeaves = 128,
