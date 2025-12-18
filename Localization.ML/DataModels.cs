@@ -19,7 +19,7 @@ public sealed class ClassificationExample
     [LoadColumn(0)]
     public bool Label { get; set; }
 
-    [VectorType]
+    [VectorType(FeatureBuilder.ExpectedFeatureCount)]
     public float[] Features { get; set; } = Array.Empty<float>();
 }
 
@@ -28,7 +28,7 @@ public sealed class RegressionExample
     [LoadColumn(0)]
     public float Label { get; set; }
 
-    [VectorType]
+    [VectorType(FeatureBuilder.ExpectedFeatureCount)]
     public float[] Features { get; set; } = Array.Empty<float>();
 }
 

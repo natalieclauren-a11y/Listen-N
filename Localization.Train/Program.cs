@@ -44,6 +44,11 @@ internal static class Program
             return new ClassificationExample { Label = r.IsDual, Features = features.Select(f => (float)f).ToArray() };
         }).ToList();
 
+        if (classificationExamples.Count == 0)
+        {
+            throw new InvalidOperationException("No training rows loaded. Check --data-dir and expected CSV filenames.");
+        }
+
         var (classifierHoldoutModel, metrics, importances) = trainer.TrainClassifier(classificationExamples);
         var cv = trainer.CrossValidateClassifier(classificationExamples);
         var randomCheck = trainer.RandomLabelSanityCheck(classificationExamples);
@@ -85,6 +90,16 @@ internal static class Program
         var singleTargets = singleRows.Select(r => r.SingleCoordinates!).ToList();
         var dualFeatures = dualRows.Select(r => featureBuilder.BuildFeatures(r.Channels, r.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray()).ToList();
         var dualTargets = dualRows.Select(r => r.DualCoordinates!).ToList();
+
+        if (singleFeatures.Count == 0)
+        {
+            throw new InvalidOperationException("No single-source regression rows loaded. Check --data-dir and expected CSV filenames.");
+        }
+
+        if (dualFeatures.Count == 0)
+        {
+            throw new InvalidOperationException("No dual-source regression rows loaded. Check --data-dir and expected CSV filenames.");
+        }
 
         double singleR2 = TrainWithHoldout(trainer, singleFeatures, singleTargets, new[] { "x", "y", "z" });
         double dualR2 = TrainWithHoldout(trainer, dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
