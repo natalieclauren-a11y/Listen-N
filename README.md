@@ -35,3 +35,39 @@ Listen-N is a Windows Forms application for coordinating LISTEN-N neutron detect
 
 ## License
 Currently no license file is present. Add one before distributing binaries.
+
+## Localization ML pipeline
+The repository now contains a standalone .NET 8 solution (`Localization.sln`) with:
+
+- **Localization.ML** — a reusable library that computes deterministic features (raw counts, normalized intensities, entropy, Gini, anisotropy, dipole proxy, and optional duration), trains ML.NET models, and performs meta-routing with OOD and centroid safeguards.
+- **Localization.Train** — a console trainer that reads the provided CSV tables, runs the required validation suite, and emits serialized artifacts plus a metrics/config bundle.
+- **Localization.ML.Tests** — xUnit coverage for the feature builder, asserting entropy/Gini/anisotropy/dipole calculations.
+
+### How to train
+Place the four CSVs (`Cf_30_Second_LMX.csv`, `Single_60_Second_Cf.csv`, `Dual_Cf_30_Second.csv`, `Dual_Cf_60_Second_LMX.csv`) in a directory and run:
+
+```bash
+dotnet run --project Localization.Train -- --data-dir ./data --output-dir ./artifacts --duration 30
+```
+
+`--duration` provides a fallback `duration_s` if the column is absent; the tool also infers durations from filenames containing `_*_Second_*.csv`. The trainer reports classifier holdout metrics (accuracy/precision/recall/F1, confusion matrix), 5-fold CV results, the random-label sanity check, feature importances, and R² for both regressors. Artifacts include `classifier.zip`, regressor bundles, `pipeline_config.json`, `mahalanobis.json`, and `training_summary.json`.
+
+### How to run inference
+Consume the artifacts via `LocalizationPipeline` in `Localization.ML`:
+
+```csharp
+using Localization.ML;
+
+var pipeline = LocalizationPipeline.Load("./artifacts");
+var result = pipeline.Predict(new LocalizationRow
+{
+    Channels = new double[] { /* Channel1..Channel15 */ },
+    DurationSeconds = 30
+});
+
+Console.WriteLine($"Label: {result.Label}, p={result.Probability:F3}");
+Console.WriteLine($"Coords: {string.Join(",", result.Coordinates)}");
+Console.WriteLine($"OOD distance: {result.Diagnostics.MahalanobisDistance:F3}");
+```
+
+The pipeline enforces feature parity, marks high Mahalanobis distance as `Unknown`, and applies the centroid override when a dual prediction is low-confidence and spatially collapsed.

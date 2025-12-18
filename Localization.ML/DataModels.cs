@@ -1,0 +1,89 @@
+using System;
+using System.Collections.Generic;
+using System.Text.Json.Serialization;
+using Microsoft.ML.Data;
+
+namespace Localization.ML;
+
+public sealed class LocalizationRow
+{
+    public required double[] Channels { get; init; }
+    public double? DurationSeconds { get; init; }
+    public bool IsDual { get; init; }
+    public double[]? SingleCoordinates { get; init; }
+    public double[]? DualCoordinates { get; init; }
+}
+
+public sealed class ClassificationExample
+{
+    [LoadColumn(0)]
+    public bool Label { get; set; }
+
+    [VectorType]
+    public float[] Features { get; set; } = Array.Empty<float>();
+}
+
+public sealed class RegressionExample
+{
+    [LoadColumn(0)]
+    public float Label { get; set; }
+
+    [VectorType]
+    public float[] Features { get; set; } = Array.Empty<float>();
+}
+
+public sealed class ClassificationPrediction
+{
+    [ColumnName("PredictedLabel")]
+    public bool PredictedLabel { get; set; }
+
+    public float Probability { get; set; }
+    public float Score { get; set; }
+}
+
+public sealed class RegressionPrediction
+{
+    public float Score { get; set; }
+}
+
+public sealed class PredictionDiagnostics
+{
+    public double MahalanobisDistance { get; init; }
+    public bool IsOutOfDistribution { get; init; }
+    public IReadOnlyList<string> FeatureNames { get; init; } = Array.Empty<string>();
+}
+
+public sealed class PredictionResult
+{
+    public required string Label { get; init; }
+    public required IReadOnlyList<double> Coordinates { get; init; }
+    public required double Probability { get; init; }
+    public ClassificationPrediction RawClassification { get; init; } = new();
+    public PredictionDiagnostics Diagnostics { get; init; } = new();
+    public IReadOnlyList<double>? RawClassifierProbabilities { get; init; }
+}
+
+public sealed class TrainingSummary
+{
+    public required double HoldoutAccuracy { get; init; }
+    public required double HoldoutPrecision { get; init; }
+    public required double HoldoutRecall { get; init; }
+    public required double HoldoutF1 { get; init; }
+    public required double CrossValidationAccuracyMean { get; init; }
+    public required double CrossValidationAccuracyStd { get; init; }
+    public required double RandomLabelAccuracy { get; init; }
+    public required double SingleRegressorR2 { get; init; }
+    public required double DualRegressorR2 { get; init; }
+    public required IReadOnlyList<(string Feature, double Gain)> FeatureImportance { get; init; }
+}
+
+public sealed class PipelineConfiguration
+{
+    public double Epsilon { get; set; }
+    public double OutOfDistributionThreshold { get; set; }
+    public double MinimumSeparationCm { get; set; }
+    public double StrictProbability { get; set; }
+    public IReadOnlyList<string> FeatureNames { get; set; } = Array.Empty<string>();
+    public IReadOnlyList<double> DipolePositions { get; set; } = Array.Empty<double>();
+    public TrainingSummary? TrainingSummary { get; set; }
+}
