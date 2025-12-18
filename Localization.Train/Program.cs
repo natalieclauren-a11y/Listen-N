@@ -4,6 +4,8 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using Microsoft.ML;
+using Microsoft.ML.Trainers.FastTree;
 using Localization.ML;
 
 namespace Localization.Train;
@@ -65,14 +67,18 @@ internal static class Program
         }
 
         // Train classifier on full data for saving
-        var classifierPipeline = trainer.MlContext.BinaryClassification.Trainers.FastForest(new Microsoft.ML.Trainers.FastForestBinaryTrainer.Options
-        {
-            NumberOfTrees = 200,
-            NumberOfLeaves = 64,
-            LabelColumnName = nameof(ClassificationExample.Label),
-            FeatureColumnName = nameof(ClassificationExample.Features)
-        });
-        var classifierFull = classifierPipeline.Fit(trainer.MlContext.Data.LoadFromEnumerable(classificationExamples));
+        var classifierPipeline = trainer.MlContext.BinaryClassification.Trainers.FastForest(
+            new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
+            {
+                NumberOfTrees = 200,
+                NumberOfLeaves = 64,
+                LabelColumnName = nameof(ClassificationExample.Label),
+                FeatureColumnName = nameof(ClassificationExample.Features)
+            });
+
+        var classifierFull = classifierPipeline.Fit(
+            trainer.MlContext.Data.LoadFromEnumerable(classificationExamples));
+
 
         // Regression datasets
         var singleFeatures = singleRows.Select(r => featureBuilder.BuildFeatures(r.Channels, r.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray()).ToList();
