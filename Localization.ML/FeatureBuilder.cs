@@ -7,6 +7,7 @@ namespace Localization.ML;
 public sealed class FeatureBuilder
 {
     public const int ChannelCount = 15;
+    public const int ExpectedFeatureCount = 36;
     public IReadOnlyList<string> FeatureNames { get; }
     public IReadOnlyList<double> DipolePositions { get; }
     public double Epsilon { get; }
@@ -90,6 +91,11 @@ public sealed class FeatureBuilder
         featureVector.Add(dipole);
         featureVector.Add(duration);
 
+        if (featureVector.Count != ExpectedFeatureCount)
+        {
+            throw new InvalidOperationException($"FeatureBuilder produced {featureVector.Count} features but expected {ExpectedFeatureCount}");
+        }
+
         return new FeatureComputationResult
         {
             Channels = channels.ToArray(),
@@ -106,9 +112,9 @@ public sealed class FeatureBuilder
 
     public void EnsureFeatureParity(double[] features)
     {
-        if (features.Length != FeatureNames.Count)
+        if (features.Length != ExpectedFeatureCount)
         {
-            throw new InvalidOperationException($"Feature vector length {features.Length} does not match expected {FeatureNames.Count}");
+            throw new InvalidOperationException($"Feature vector length {features.Length} does not match expected {ExpectedFeatureCount}");
         }
 
         if (features.Any(double.IsNaN) || features.Any(double.IsInfinity))
