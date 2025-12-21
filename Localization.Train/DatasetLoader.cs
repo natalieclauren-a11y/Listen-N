@@ -90,6 +90,24 @@ internal static class DatasetLoader
         int? xIndex = TryGetIndex(table.HeaderMap, "x");
         int? yIndex = TryGetIndex(table.HeaderMap, "y");
         int? zIndex = TryGetIndex(table.HeaderMap, "z");
+        int? fileNameIndex = TryGetIndex(table.HeaderMap, "File Name")
+            ?? TryGetIndex(table.HeaderMap, "FileName")
+            ?? TryGetIndex(table.HeaderMap, "filename");
+
+        bool hasExplicitCoords = xIndex.HasValue && yIndex.HasValue && zIndex.HasValue;
+        if (!hasExplicitCoords && !fileNameIndex.HasValue)
+        {
+            var headerPreview = table.Headers
+                .Select(h => (h ?? string.Empty).Trim())
+                .Take(30)
+                .ToArray();
+            var headerSummary = headerPreview.Length == 0
+                ? "(none)"
+                : string.Join(", ", headerPreview);
+            throw new InvalidOperationException(
+                $"File {path} is missing single coordinate columns. Expected x,y,z or File Name. " +
+                $"Headers found (first {headerPreview.Length}): {headerSummary}");
+        }
 
         var rows = new List<LocalizationRow>();
         foreach (var cols in table.Rows)
@@ -105,9 +123,21 @@ internal static class DatasetLoader
                 : inferredDuration;
 
             var single = new double[3];
-            single[0] = ParseDouble(SafeGet(cols, xIndex!.Value));
-            single[1] = ParseDouble(SafeGet(cols, yIndex!.Value));
-            single[2] = ParseDouble(SafeGet(cols, zIndex!.Value));
+            if (hasExplicitCoords)
+            {
+                single[0] = ParseDouble(SafeGet(cols, xIndex!.Value));
+                single[1] = ParseDouble(SafeGet(cols, yIndex!.Value));
+                single[2] = ParseDouble(SafeGet(cols, zIndex!.Value));
+            }
+            else
+            {
+                var rawFileName = SafeGet(cols, fileNameIndex!.Value);
+                if (!TryParseSingleCoordsFromFileName(rawFileName, out single[0], out single[1], out single[2]))
+                {
+                    Console.WriteLine($"Warning: Unable to parse coordinates from file name '{rawFileName}'. Skipping row.");
+                    continue;
+                }
+            }
             rows.Add(new LocalizationRow
             {
                 Channels = channels,
@@ -329,6 +359,33 @@ internal static class DatasetLoader
     private static double? ParseNullableDouble(string value)
     {
         return double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var result) ? result : null;
+    }
+
+    private static bool TryParseSingleCoordsFromFileName(string fileName, out double x, out double y, out double z)
+    {
+        x = 0;
+        y = 0;
+        z = 0;
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        var baseName = Path.GetFileName(fileName.Trim());
+        var segments = baseName.Split('_');
+        if (segments.Length < 4)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(segments[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+        {
+            return false;
+        }
+
+        return double.TryParse(segments[1], NumberStyles.Any, CultureInfo.InvariantCulture, out x)
+            && double.TryParse(segments[2], NumberStyles.Any, CultureInfo.InvariantCulture, out y)
+            && double.TryParse(segments[3], NumberStyles.Any, CultureInfo.InvariantCulture, out z);
     }
 
     private static double? InferDurationFromName(string path)
