@@ -24,11 +24,12 @@ public sealed class ModelTrainer
     public FeatureBuilder FeatureBuilder => _featureBuilder;
     public MLContext MlContext => _mlContext;
 
-    public (ITransformer Model, BinaryClassificationMetrics Metrics, IReadOnlyList<(string Feature, double Gain)> Importances) TrainClassifier(IReadOnlyList<ClassificationExample> data)
+    public (ITransformer Model, BinaryClassificationMetrics Metrics, IReadOnlyList<(string Feature, double Gain)> Importances) TrainClassifier(IReadOnlyList<ClassificationExample> data, int permutationCount = 5)
     {
         var split = StratifiedSplit(data, 0.25);
         var trainData = _mlContext.Data.LoadFromEnumerable(split.Train);
         var testData = _mlContext.Data.LoadFromEnumerable(split.Test);
+        var testList = split.Test.ToList();
 
         var pipeline = _mlContext.BinaryClassification.Trainers.FastForest(new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
 
@@ -42,9 +43,49 @@ public sealed class ModelTrainer
         var model = pipeline.Fit(trainData);
         var predictions = model.Transform(testData);
         var metrics = _mlContext.BinaryClassification.Evaluate(predictions, labelColumnName: nameof(ClassificationExample.Label));
+        var baselineAuc = metrics.AreaUnderRocCurve;
 
-        var importances = _mlContext.BinaryClassification.PermutationFeatureImportance(model, testData, permutationCount: 10)
-            .Select((metrics, idx) => (Feature: _featureBuilder.FeatureNames[idx], Gain: metrics.AreaUnderRocCurve.Mean))
+        var importances = new List<(string Feature, double Gain)>();
+        if (testList.Count > 0)
+        {
+            var random = new Random(42);
+            var featureCount = testList[0].Features.Length;
+            var effectivePermutationCount = Math.Max(1, permutationCount);
+            for (int featureIndex = 0; featureIndex < featureCount; featureIndex++)
+            {
+                double aucDropSum = 0;
+                for (int permutationIndex = 0; permutationIndex < effectivePermutationCount; permutationIndex++)
+                {
+                    var shuffledIndices = Enumerable.Range(0, testList.Count)
+                        .OrderBy(_ => random.Next())
+                        .ToArray();
+                    var permutedList = new List<ClassificationExample>(testList.Count);
+
+                    for (int rowIndex = 0; rowIndex < testList.Count; rowIndex++)
+                    {
+                        var original = testList[rowIndex];
+                        var permutedFeatures = (float[])original.Features.Clone();
+                        permutedFeatures[featureIndex] = testList[shuffledIndices[rowIndex]].Features[featureIndex];
+                        permutedList.Add(new ClassificationExample
+                        {
+                            Features = permutedFeatures,
+                            Label = original.Label
+                        });
+                    }
+
+                    var permutedView = _mlContext.Data.LoadFromEnumerable(permutedList);
+                    var permutedMetrics = _mlContext.BinaryClassification.Evaluate(
+                        model.Transform(permutedView),
+                        labelColumnName: nameof(ClassificationExample.Label));
+                    aucDropSum += baselineAuc - permutedMetrics.AreaUnderRocCurve;
+                }
+
+                var gain = aucDropSum / effectivePermutationCount;
+                importances.Add((_featureBuilder.FeatureNames[featureIndex], gain));
+            }
+        }
+
+        importances = importances
             .OrderByDescending(x => x.Gain)
             .ToList();
 
