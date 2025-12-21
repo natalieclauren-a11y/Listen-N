@@ -143,12 +143,36 @@ internal static class DatasetLoader
 
     private static int[] ResolveChannelIndexes(Table table, string path)
     {
-        var channelIndexes = Enumerable.Range(1, FeatureBuilder.ChannelCount)
-            .Select(i => TryGetIndex(table.HeaderMap, $"Channel{i}") ?? -1)
-            .ToArray();
-        if (channelIndexes.Any(i => i < 0))
+        var missingChannels = new List<string>();
+        var channelIndexes = new int[FeatureBuilder.ChannelCount];
+        for (int i = 1; i <= FeatureBuilder.ChannelCount; i++)
         {
-            throw new InvalidOperationException($"File {path} is missing one or more Channel columns");
+            var exactHeader = $"Channel{i}";
+            var spacedHeader = $"Channel {i}";
+            int? index = TryGetIndex(table.HeaderMap, exactHeader)
+                ?? TryGetIndex(table.HeaderMap, spacedHeader);
+            if (!index.HasValue)
+            {
+                missingChannels.Add(exactHeader);
+                channelIndexes[i - 1] = -1;
+                continue;
+            }
+
+            channelIndexes[i - 1] = index.Value;
+        }
+
+        if (missingChannels.Count > 0)
+        {
+            var headerPreview = table.Headers
+                .Select(h => (h ?? string.Empty).Trim())
+                .Take(30)
+                .ToArray();
+            var headerSummary = headerPreview.Length == 0
+                ? "(none)"
+                : string.Join(", ", headerPreview);
+            throw new InvalidOperationException(
+                $"File {path} is missing channel columns: {string.Join(", ", missingChannels)}. " +
+                $"Headers found (first {headerPreview.Length}): {headerSummary}");
         }
 
         return channelIndexes;
