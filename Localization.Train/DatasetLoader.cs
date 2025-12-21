@@ -1,59 +1,255 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Data;
 using System.IO;
 using System.Linq;
+using System.Text;
+using ExcelDataReader;
 using Localization.ML;
 
 namespace Localization.Train;
 
 internal static class DatasetLoader
 {
+    private static readonly string[] PreferredJoinKeys = { "pair_id", "pairid", "pair", "id", "index", "row" };
+
     public static IReadOnlyList<LocalizationRow> LoadSingleSource(string path, double? fallbackDuration)
     {
-        return LoadInternal(path, isDual: false, fallbackDuration);
+        return LoadSingleInternal(path, fallbackDuration);
     }
 
     public static IReadOnlyList<LocalizationRow> LoadDualSource(string path, double? fallbackDuration)
     {
-        return LoadInternal(path, isDual: true, fallbackDuration);
+        return LoadDualSource(path, pairMetadataPath: null, fallbackDuration);
     }
 
-    private static IReadOnlyList<LocalizationRow> LoadInternal(string path, bool isDual, double? fallbackDuration)
+    public static IReadOnlyList<LocalizationRow> LoadDualSource(string path, string? pairMetadataPath, double? fallbackDuration)
     {
-        var lines = File.ReadAllLines(path);
-        if (lines.Length == 0)
+        var countsTable = LoadTable(path);
+        if (countsTable.Rows.Count == 0)
         {
             return Array.Empty<LocalizationRow>();
         }
 
-        var headers = lines[0].Split(',');
-        var headerMap = headers
-            .Select((h, idx) => (Header: h.Trim(), Index: idx))
-            .ToDictionary(h => h.Header, h => h.Index, StringComparer.OrdinalIgnoreCase);
+        var channelIndexes = ResolveChannelIndexes(countsTable, path);
+        int? durationIndex = TryGetIndex(countsTable.HeaderMap, "duration_s");
+        double? inferredDuration = fallbackDuration ?? InferDurationFromName(path);
 
+        var coordinateTable = pairMetadataPath == null
+            ? countsTable
+            : LoadTable(pairMetadataPath);
+
+        var coordIndexes = ResolveDualCoordinateIndexes(coordinateTable, pairMetadataPath ?? path);
+
+        string? joinKey = FindJoinKey(countsTable.Headers, coordinateTable.Headers);
+        var rows = new List<LocalizationRow>();
+        if (joinKey != null)
+        {
+            var metadataLookup = BuildMetadataLookup(coordinateTable, coordIndexes, joinKey);
+            foreach (var countRow in countsTable.Rows)
+            {
+                if (!TryGetValue(countsTable, countRow, joinKey, out var keyValue))
+                {
+                    continue;
+                }
+
+                if (!metadataLookup.TryGetValue(keyValue, out var dualCoords))
+                {
+                    continue;
+                }
+
+                rows.Add(CreateDualRow(countRow, channelIndexes, durationIndex, inferredDuration, dualCoords));
+            }
+        }
+        else
+        {
+            int rowCount = Math.Min(countsTable.Rows.Count, coordinateTable.Rows.Count);
+            for (int i = 0; i < rowCount; i++)
+            {
+                var dualCoords = ParseDualCoords(coordinateTable.Rows[i], coordIndexes);
+                rows.Add(CreateDualRow(countsTable.Rows[i], channelIndexes, durationIndex, inferredDuration, dualCoords));
+            }
+        }
+
+        return rows;
+    }
+
+    private static IReadOnlyList<LocalizationRow> LoadSingleInternal(string path, double? fallbackDuration)
+    {
+        var table = LoadTable(path);
+        if (table.Rows.Count == 0)
+        {
+            return Array.Empty<LocalizationRow>();
+        }
+
+        var channelIndexes = ResolveChannelIndexes(table, path);
+        int? durationIndex = TryGetIndex(table.HeaderMap, "duration_s");
+        double? inferredDuration = fallbackDuration ?? InferDurationFromName(path);
+
+        int? xIndex = TryGetIndex(table.HeaderMap, "x");
+        int? yIndex = TryGetIndex(table.HeaderMap, "y");
+        int? zIndex = TryGetIndex(table.HeaderMap, "z");
+
+        var rows = new List<LocalizationRow>();
+        foreach (var cols in table.Rows)
+        {
+            double[] channels = new double[FeatureBuilder.ChannelCount];
+            for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
+            {
+                channels[i] = ParseDouble(SafeGet(cols, channelIndexes[i]));
+            }
+
+            double? duration = durationIndex.HasValue
+                ? ParseNullableDouble(SafeGet(cols, durationIndex.Value))
+                : inferredDuration;
+
+            var single = new double[3];
+            single[0] = ParseDouble(SafeGet(cols, xIndex!.Value));
+            single[1] = ParseDouble(SafeGet(cols, yIndex!.Value));
+            single[2] = ParseDouble(SafeGet(cols, zIndex!.Value));
+            rows.Add(new LocalizationRow
+            {
+                Channels = channels,
+                DurationSeconds = duration,
+                IsDual = false,
+                SingleCoordinates = single
+            });
+        }
+
+        return rows;
+    }
+
+    private static LocalizationRow CreateDualRow(string[] cols, int[] channelIndexes, int? durationIndex, double? inferredDuration, double[] dualCoords)
+    {
+        double[] channels = new double[FeatureBuilder.ChannelCount];
+        for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
+        {
+            channels[i] = ParseDouble(SafeGet(cols, channelIndexes[i]));
+        }
+
+        double? duration = durationIndex.HasValue
+            ? ParseNullableDouble(SafeGet(cols, durationIndex.Value))
+            : inferredDuration;
+
+        return new LocalizationRow
+        {
+            Channels = channels,
+            DurationSeconds = duration,
+            IsDual = true,
+            DualCoordinates = dualCoords
+        };
+    }
+
+    private static int[] ResolveChannelIndexes(Table table, string path)
+    {
         var channelIndexes = Enumerable.Range(1, FeatureBuilder.ChannelCount)
-            .Select(i => TryGetIndex(headerMap, $"Channel{i}") ?? -1)
+            .Select(i => TryGetIndex(table.HeaderMap, $"Channel{i}") ?? -1)
             .ToArray();
         if (channelIndexes.Any(i => i < 0))
         {
             throw new InvalidOperationException($"File {path} is missing one or more Channel columns");
         }
 
-        int? durationIndex = TryGetIndex(headerMap, "duration_s");
-        double? inferredDuration = fallbackDuration ?? InferDurationFromName(path);
+        return channelIndexes;
+    }
 
-        int? xIndex = TryGetIndex(headerMap, "x");
-        int? yIndex = TryGetIndex(headerMap, "y");
-        int? zIndex = TryGetIndex(headerMap, "z");
-        int? x1Index = TryGetIndex(headerMap, "x1");
-        int? y1Index = TryGetIndex(headerMap, "y1");
-        int? z1Index = TryGetIndex(headerMap, "z1");
-        int? x2Index = TryGetIndex(headerMap, "x2");
-        int? y2Index = TryGetIndex(headerMap, "y2");
-        int? z2Index = TryGetIndex(headerMap, "z2");
+    private static int[] ResolveDualCoordinateIndexes(Table table, string path)
+    {
+        int? x1Index = TryGetIndex(table.HeaderMap, "x1");
+        int? y1Index = TryGetIndex(table.HeaderMap, "y1");
+        int? z1Index = TryGetIndex(table.HeaderMap, "z1");
+        int? x2Index = TryGetIndex(table.HeaderMap, "x2");
+        int? y2Index = TryGetIndex(table.HeaderMap, "y2");
+        int? z2Index = TryGetIndex(table.HeaderMap, "z2");
 
-        var rows = new List<LocalizationRow>();
+        if (!x1Index.HasValue || !y1Index.HasValue || !z1Index.HasValue || !x2Index.HasValue || !y2Index.HasValue || !z2Index.HasValue)
+        {
+            throw new InvalidOperationException($"File {path} is missing one or more dual coordinate columns (x1,y1,z1,x2,y2,z2)");
+        }
+
+        return new[] { x1Index.Value, y1Index.Value, z1Index.Value, x2Index.Value, y2Index.Value, z2Index.Value };
+    }
+
+    private static double[] ParseDualCoords(string[] cols, int[] coordIndexes)
+    {
+        var dual = new double[6];
+        for (int i = 0; i < coordIndexes.Length; i++)
+        {
+            dual[i] = ParseDouble(SafeGet(cols, coordIndexes[i]));
+        }
+
+        return dual;
+    }
+
+    private static Dictionary<string, double[]> BuildMetadataLookup(Table table, int[] coordIndexes, string joinKey)
+    {
+        var lookup = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in table.Rows)
+        {
+            if (!TryGetValue(table, row, joinKey, out var key))
+            {
+                continue;
+            }
+
+            lookup[key] = ParseDualCoords(row, coordIndexes);
+        }
+
+        return lookup;
+    }
+
+    private static string? FindJoinKey(string[] countHeaders, string[] metadataHeaders)
+    {
+        var metadataSet = new HashSet<string>(metadataHeaders, StringComparer.OrdinalIgnoreCase);
+        foreach (var key in PreferredJoinKeys)
+        {
+            if (countHeaders.Any(h => string.Equals(h, key, StringComparison.OrdinalIgnoreCase)) && metadataSet.Contains(key))
+            {
+                return key;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryGetValue(Table table, string[] row, string header, out string value)
+    {
+        value = string.Empty;
+        if (!table.HeaderMap.TryGetValue(header, out var idx))
+        {
+            return false;
+        }
+
+        value = SafeGet(row, idx).Trim();
+        return value.Length > 0;
+    }
+
+    private static string SafeGet(string[] cols, int index)
+    {
+        return index >= 0 && index < cols.Length ? cols[index] : string.Empty;
+    }
+
+    private static Table LoadTable(string path)
+    {
+        var extension = Path.GetExtension(path);
+        if (string.Equals(extension, ".xlsx", StringComparison.OrdinalIgnoreCase))
+        {
+            return LoadExcelTable(path);
+        }
+
+        return LoadCsvTable(path);
+    }
+
+    private static Table LoadCsvTable(string path)
+    {
+        var lines = File.ReadAllLines(path);
+        if (lines.Length == 0)
+        {
+            return new Table(Array.Empty<string>(), new List<string[]>());
+        }
+
+        var headers = lines[0].Split(',').Select(h => h.Trim()).ToArray();
+        var rows = new List<string[]>();
         foreach (var line in lines.Skip(1))
         {
             if (string.IsNullOrWhiteSpace(line))
@@ -61,51 +257,39 @@ internal static class DatasetLoader
                 continue;
             }
 
-            var cols = line.Split(',');
-            double[] channels = new double[FeatureBuilder.ChannelCount];
-            for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
-            {
-                channels[i] = ParseDouble(cols[channelIndexes[i]]);
-            }
-
-            double? duration = durationIndex.HasValue && durationIndex.Value < cols.Length
-                ? ParseNullableDouble(cols[durationIndex.Value])
-                : inferredDuration;
-
-            if (isDual)
-            {
-                var dual = new double[6];
-                dual[0] = ParseDouble(cols[x1Index!.Value]);
-                dual[1] = ParseDouble(cols[y1Index!.Value]);
-                dual[2] = ParseDouble(cols[z1Index!.Value]);
-                dual[3] = ParseDouble(cols[x2Index!.Value]);
-                dual[4] = ParseDouble(cols[y2Index!.Value]);
-                dual[5] = ParseDouble(cols[z2Index!.Value]);
-                rows.Add(new LocalizationRow
-                {
-                    Channels = channels,
-                    DurationSeconds = duration,
-                    IsDual = true,
-                    DualCoordinates = dual
-                });
-            }
-            else
-            {
-                var single = new double[3];
-                single[0] = ParseDouble(cols[xIndex!.Value]);
-                single[1] = ParseDouble(cols[yIndex!.Value]);
-                single[2] = ParseDouble(cols[zIndex!.Value]);
-                rows.Add(new LocalizationRow
-                {
-                    Channels = channels,
-                    DurationSeconds = duration,
-                    IsDual = false,
-                    SingleCoordinates = single
-                });
-            }
+            rows.Add(line.Split(','));
         }
 
-        return rows;
+        return new Table(headers, rows);
+    }
+
+    private static Table LoadExcelTable(string path)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = ExcelReaderFactory.CreateReader(stream);
+        using var dataSet = reader.AsDataSet();
+
+        if (dataSet.Tables.Count == 0)
+        {
+            return new Table(Array.Empty<string>(), new List<string[]>());
+        }
+
+        DataTable table = dataSet.Tables[0];
+        if (table.Rows.Count == 0)
+        {
+            return new Table(Array.Empty<string>(), new List<string[]>());
+        }
+
+        var headers = table.Rows[0].ItemArray.Select(cell => (cell?.ToString() ?? string.Empty).Trim()).ToArray();
+        var rows = new List<string[]>();
+        for (int i = 1; i < table.Rows.Count; i++)
+        {
+            var row = table.Rows[i].ItemArray.Select(cell => cell?.ToString() ?? string.Empty).ToArray();
+            rows.Add(row);
+        }
+
+        return new Table(headers, rows);
     }
 
     private static int? TryGetIndex(Dictionary<string, int> headerMap, string name)
@@ -136,5 +320,12 @@ internal static class DatasetLoader
         }
 
         return null;
+    }
+
+    private sealed record Table(string[] Headers, List<string[]> Rows)
+    {
+        public Dictionary<string, int> HeaderMap { get; } = Headers
+            .Select((h, idx) => (Header: h.Trim(), Index: idx))
+            .ToDictionary(h => h.Header, h => h.Index, StringComparer.OrdinalIgnoreCase);
     }
 }
