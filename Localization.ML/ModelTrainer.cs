@@ -96,14 +96,16 @@ public sealed class ModelTrainer
     {
         var dataView = _mlContext.Data.LoadFromEnumerable(data);
 
-        var estimator = _mlContext.BinaryClassification.Trainers.FastForest(
-            new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
-            {
-                NumberOfTrees = 200,
-                NumberOfLeaves = 64,
-                LabelColumnName = nameof(ClassificationExample.Label),
-                FeatureColumnName = nameof(ClassificationExample.Features)
-            });
+        var options = new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
+        {
+            NumberOfTrees = 200,
+            NumberOfLeaves = 64,
+            LabelColumnName = nameof(ClassificationExample.Label),
+            FeatureColumnName = nameof(ClassificationExample.Features)
+        };
+
+        var estimator = _mlContext.BinaryClassification.Trainers.FastForest(options)
+            .Append(_mlContext.BinaryClassification.Calibrators.Platt());
 
         var results = _mlContext.BinaryClassification.CrossValidate(
             data: dataView,
