@@ -5,6 +5,7 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using ExcelDataReader;
 using Localization.ML;
 
@@ -372,20 +373,20 @@ internal static class DatasetLoader
         }
 
         var baseName = Path.GetFileName(fileName.Trim());
-        var segments = baseName.Split('_');
-        if (segments.Length < 4)
+        var matches = Regex.Matches(baseName, @"[-+]?\d+(?:\.\d+)?", RegexOptions.CultureInvariant);
+        if (matches.Count < 4)
         {
             return false;
         }
 
-        if (!int.TryParse(segments[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+        if (!int.TryParse(matches[0].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
         {
             return false;
         }
 
-        return double.TryParse(segments[1], NumberStyles.Any, CultureInfo.InvariantCulture, out x)
-            && double.TryParse(segments[2], NumberStyles.Any, CultureInfo.InvariantCulture, out y)
-            && double.TryParse(segments[3], NumberStyles.Any, CultureInfo.InvariantCulture, out z);
+        return double.TryParse(matches[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out x)
+            && double.TryParse(matches[2].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out y)
+            && double.TryParse(matches[3].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out z);
     }
 
     private static double? InferDurationFromName(string path)
