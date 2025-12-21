@@ -37,7 +37,7 @@ public sealed class ModelTrainer
             NumberOfLeaves = 64,
             LabelColumnName = nameof(ClassificationExample.Label),
             FeatureColumnName = nameof(ClassificationExample.Features)
-        });
+        }).Append(_mlContext.BinaryClassification.Calibrators.Platt());
 
         var model = pipeline.Fit(trainData);
         var predictions = model.Transform(testData);
