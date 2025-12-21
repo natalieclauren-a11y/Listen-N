@@ -12,16 +12,22 @@ namespace Localization.Train;
 
 internal static class Program
 {
-    private static readonly string[] SingleFiles =
+    private static readonly string[] SingleGroups =
     {
-        "Cf_30_Second_LMX.csv",
-        "Single_60_Second_Cf.csv"
+        "Cf_30_Second_LMX",
+        "Single_60_Second_Cf"
     };
 
-    private static readonly string[] DualFiles =
+    private static readonly string[] DualGroups =
     {
-        "Dual_Cf_30_Second.csv",
-        "Dual_Cf_60_Second_LMX.csv"
+        "Dual_Cf_30_Second",
+        "Dual_Cf_60_Second_LMX"
+    };
+
+    private static readonly Dictionary<string, string> PairMetadataGroups = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Dual_Cf_30_Second", "pair_metadata_30" },
+        { "Dual_Cf_60_Second_LMX", "pair_metadata_60" }
     };
 
     public static void Main(string[] args)
@@ -32,8 +38,8 @@ internal static class Program
         var trainer = new ModelTrainer();
         var featureBuilder = trainer.FeatureBuilder;
 
-        var singleRows = LoadRows(dataDir, SingleFiles, false, durationOverride);
-        var dualRows = LoadRows(dataDir, DualFiles, true, durationOverride);
+        var singleRows = LoadSingleGroups(dataDir, durationOverride);
+        var dualRows = LoadDualGroups(dataDir, durationOverride);
         var allRows = singleRows.Concat(dualRows).ToList();
 
         Console.WriteLine($"Loaded {singleRows.Count} single-source rows and {dualRows.Count} dual-source rows");
@@ -46,7 +52,7 @@ internal static class Program
 
         if (classificationExamples.Count == 0)
         {
-            throw new InvalidOperationException("No training rows loaded. Check --data-dir and expected CSV filenames.");
+            throw new InvalidOperationException("No training rows loaded. Check --data-dir and available dataset groups.");
         }
 
         var (classifierHoldoutModel, metrics, importances) = trainer.TrainClassifier(classificationExamples);
@@ -93,23 +99,27 @@ internal static class Program
 
         if (singleFeatures.Count == 0)
         {
-            throw new InvalidOperationException("No single-source regression rows loaded. Check --data-dir and expected CSV filenames.");
+            Console.WriteLine("Warning: no single-source regression rows loaded; training a fallback regressor with zeros.");
         }
 
         if (dualFeatures.Count == 0)
         {
-            throw new InvalidOperationException("No dual-source regression rows loaded. Check --data-dir and expected CSV filenames.");
+            Console.WriteLine("Warning: no dual-source regression rows loaded; training a fallback regressor with zeros.");
         }
 
-        double singleR2 = TrainWithHoldout(trainer, singleFeatures, singleTargets, new[] { "x", "y", "z" });
-        double dualR2 = TrainWithHoldout(trainer, dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
+        double singleR2 = singleFeatures.Count == 0 ? double.NaN : TrainWithHoldout(trainer, singleFeatures, singleTargets, new[] { "x", "y", "z" });
+        double dualR2 = dualFeatures.Count == 0 ? double.NaN : TrainWithHoldout(trainer, dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
 
         Console.WriteLine($"Single-source regressor R^2 (mean): {singleR2:F3}");
         Console.WriteLine($"Dual-source regressor R^2 (mean): {dualR2:F3}");
 
         // Fit final regressors on all data
-        var singleRegressor = trainer.TrainMultiRegressor(singleFeatures, singleTargets, new[] { "x", "y", "z" });
-        var dualRegressor = trainer.TrainMultiRegressor(dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
+        var singleRegressor = singleFeatures.Count == 0
+            ? TrainFallbackRegressor(trainer, featureBuilder, durationOverride, new[] { "x", "y", "z" })
+            : trainer.TrainMultiRegressor(singleFeatures, singleTargets, new[] { "x", "y", "z" });
+        var dualRegressor = dualFeatures.Count == 0
+            ? TrainFallbackRegressor(trainer, featureBuilder, durationOverride, new[] { "x1", "y1", "z1", "x2", "y2", "z2" })
+            : trainer.TrainMultiRegressor(dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
 
         // OOD scoring
         var oodFeatures = classificationExamples.Select(c => ExtractOodVector(c.Features)).ToList();
@@ -274,22 +284,93 @@ internal static class Program
         return (dataDir, outputDir, duration);
     }
 
-    private static List<LocalizationRow> LoadRows(string dataDir, IEnumerable<string> files, bool isDual, double? durationOverride)
+    private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
     {
-        var list = new List<LocalizationRow>();
-        foreach (var file in files)
+        var rows = new List<LocalizationRow>();
+        foreach (var group in SingleGroups)
         {
-            var path = Path.Combine(dataDir, file);
-            if (!File.Exists(path))
+            var files = FindFilesByPrefix(dataDir, group);
+            if (files.Count == 0)
             {
-                Console.WriteLine($"Warning: file {path} not found, skipping");
+                Console.WriteLine($"Warning: missing single-source group {group}");
                 continue;
             }
 
-            var rows = isDual ? DatasetLoader.LoadDualSource(path, durationOverride) : DatasetLoader.LoadSingleSource(path, durationOverride);
-            list.AddRange(rows);
+            foreach (var file in files)
+            {
+                rows.AddRange(DatasetLoader.LoadSingleSource(file, durationOverride));
+            }
+        }
+
+        return rows;
+    }
+
+    private static List<LocalizationRow> LoadDualGroups(string dataDir, double? durationOverride)
+    {
+        var list = new List<LocalizationRow>();
+        foreach (var group in DualGroups)
+        {
+            var countFiles = FindFilesByPrefix(dataDir, group);
+            if (countFiles.Count == 0)
+            {
+                Console.WriteLine($"Warning: missing dual-source group {group}");
+                continue;
+            }
+
+            if (!PairMetadataGroups.TryGetValue(group, out var metadataPrefix))
+            {
+                Console.WriteLine($"Warning: missing pair metadata mapping for group {group}");
+                continue;
+            }
+
+            var metadataFiles = FindFilesByPrefix(dataDir, metadataPrefix);
+            if (metadataFiles.Count == 0)
+            {
+                Console.WriteLine($"Warning: missing pair metadata group {metadataPrefix} for dual group {group}");
+                continue;
+            }
+
+            if (metadataFiles.Count > 1)
+            {
+                Console.WriteLine($"Warning: multiple metadata files found for {metadataPrefix}; using {metadataFiles[0]}");
+            }
+
+            foreach (var countFile in countFiles)
+            {
+                list.AddRange(DatasetLoader.LoadDualSource(countFile, metadataFiles[0], durationOverride));
+            }
         }
 
         return list;
+    }
+
+    private static List<string> FindFilesByPrefix(string dataDir, string prefix)
+    {
+        var files = Directory.EnumerateFiles(dataDir)
+            .Where(path =>
+            {
+                var extension = Path.GetExtension(path);
+                if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(extension, ".xlsx", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                var name = Path.GetFileNameWithoutExtension(path);
+                return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+            })
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return files;
+    }
+
+    private static RegressionModelGroup TrainFallbackRegressor(ModelTrainer trainer, FeatureBuilder featureBuilder, double? durationOverride, IReadOnlyList<string> targetNames)
+    {
+        var channels = new double[FeatureBuilder.ChannelCount];
+        var duration = durationOverride ?? 0;
+        var features = featureBuilder.BuildFeatures(channels, duration).FeatureVector.Select(f => (float)f).ToArray();
+        var targets = new double[targetNames.Count];
+        return trainer.TrainMultiRegressor(new[] { features }, new[] { targets }, targetNames);
     }
 }
