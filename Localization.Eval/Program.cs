@@ -757,14 +757,19 @@ internal static class Program
         var rows = new List<LocalizationRow>();
         foreach (var group in SingleGroups)
         {
-            var path = Path.Combine(dataDir, $"{group}.csv");
-            if (!File.Exists(path))
+            var files = FindFilesByPrefix(dataDir, group);
+            if (files.Count == 0)
             {
-                Console.WriteLine($"Warning: missing single-source group {group} (expected {Path.GetFullPath(path)})");
+                Console.WriteLine($"Warning: missing single-source group {group}");
                 continue;
             }
 
-            rows.AddRange(DatasetLoader.LoadSingleSource(path, durationOverride));
+            foreach (var file in files)
+            {
+                var result = DatasetLoader.LoadSingleSource(file, durationOverride);
+                PrintLoadStats(file, result);
+                rows.AddRange(result.Rows);
+            }
         }
 
         return rows;
@@ -775,30 +780,72 @@ internal static class Program
         var list = new List<LocalizationRow>();
         foreach (var group in DualGroups)
         {
-            var countsPath = Path.Combine(dataDir, $"{group}.csv");
-            if (!File.Exists(countsPath))
+            var countFiles = FindFilesByPrefix(dataDir, group);
+            if (countFiles.Count == 0)
             {
-                Console.WriteLine($"Warning: missing dual-source group {group} (expected {Path.GetFullPath(countsPath)})");
+                Console.WriteLine($"Warning: missing dual-source group {group}");
                 continue;
             }
 
-            if (!PairMetadataGroups.TryGetValue(group, out var metadataPrefix))
+            PairMetadataGroups.TryGetValue(group, out var metadataPrefix);
+            var metadataFiles = string.IsNullOrWhiteSpace(metadataPrefix)
+                ? new List<string>()
+                : FindFilesByPrefix(dataDir, metadataPrefix);
+
+            string? metadataPath = null;
+            if (metadataFiles.Count > 0)
             {
-                Console.WriteLine($"Warning: missing pair metadata mapping for group {group}");
-                continue;
+                metadataPath = metadataFiles[0];
+                if (metadataFiles.Count > 1)
+                {
+                    Console.WriteLine($"Warning: multiple metadata files found for {metadataPrefix}; using {metadataPath}");
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(metadataPrefix))
+            {
+                Console.WriteLine($"Warning: missing pair metadata group {metadataPrefix} for dual group {group}; falling back to filename parsing.");
             }
 
-            var metadataPath = Path.Combine(dataDir, $"{metadataPrefix}.csv");
-            if (!File.Exists(metadataPath))
+            foreach (var countFile in countFiles)
             {
-                Console.WriteLine($"Warning: missing pair metadata group {metadataPrefix} for dual group {group} (expected {Path.GetFullPath(metadataPath)})");
-                continue;
+                var result = DatasetLoader.LoadDualSource(countFile, metadataPath, durationOverride);
+                PrintLoadStats(countFile, result);
+                list.AddRange(result.Rows);
             }
-
-            list.AddRange(DatasetLoader.LoadDualSource(countsPath, metadataPath, durationOverride));
         }
 
         return list;
+    }
+
+    private static List<string> FindFilesByPrefix(string dataDir, string prefix)
+    {
+        if (!Directory.Exists(dataDir))
+        {
+            return new List<string>();
+        }
+
+        var files = Directory.EnumerateFiles(dataDir)
+            .Where(path =>
+            {
+                var extension = Path.GetExtension(path);
+                if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                var name = Path.GetFileNameWithoutExtension(path);
+                return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+            })
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return files;
+    }
+
+    private static void PrintLoadStats(string path, DatasetLoader.LoadResult result)
+    {
+        var fileName = Path.GetFileName(path);
+        Console.WriteLine($"{fileName}: rows read={result.RowsRead}, rows accepted={result.RowsAccepted}, rows skipped={result.RowsSkipped}");
     }
 
     private static void PrintCsvPreflight(string dataDir)
@@ -846,73 +893,106 @@ internal static class DatasetLoader
 {
     private static readonly string[] PreferredJoinKeys = { "pair_id", "pairid", "pair", "id", "index", "row" };
 
-    public static IReadOnlyList<LocalizationRow> LoadSingleSource(string path, double? fallbackDuration)
+    public sealed record LoadResult(List<LocalizationRow> Rows, int RowsRead, int RowsAccepted, int RowsSkipped);
+
+    public static LoadResult LoadSingleSource(string path, double? fallbackDuration)
     {
         return LoadSingleInternal(path, fallbackDuration);
     }
 
-    public static IReadOnlyList<LocalizationRow> LoadDualSource(string path, double? fallbackDuration)
+    public static LoadResult LoadDualSource(string path, double? fallbackDuration)
     {
         return LoadDualSource(path, pairMetadataPath: null, fallbackDuration);
     }
 
-    public static IReadOnlyList<LocalizationRow> LoadDualSource(string path, string? pairMetadataPath, double? fallbackDuration)
+    public static LoadResult LoadDualSource(string path, string? pairMetadataPath, double? fallbackDuration)
     {
         var countsTable = LoadTable(path);
         if (countsTable.Rows.Count == 0)
         {
-            return Array.Empty<LocalizationRow>();
+            return new LoadResult(new List<LocalizationRow>(), 0, 0, 0);
         }
 
         var channelIndexes = ResolveChannelIndexes(countsTable, path);
         int? durationIndex = TryGetIndex(countsTable.HeaderMap, "duration_s");
         double? inferredDuration = fallbackDuration ?? InferDurationFromName(path);
+        int? fileNameIndex = TryGetIndex(countsTable.HeaderMap, "File Name")
+            ?? TryGetIndex(countsTable.HeaderMap, "FileName")
+            ?? TryGetIndex(countsTable.HeaderMap, "filename");
 
-        var coordinateTable = pairMetadataPath == null
-            ? countsTable
-            : LoadTable(pairMetadataPath);
+        Table? coordinateTable = null;
+        int[]? metadataCoordIndexes = null;
+        if (!string.IsNullOrWhiteSpace(pairMetadataPath) && File.Exists(pairMetadataPath))
+        {
+            coordinateTable = LoadTable(pairMetadataPath);
+            if (!TryResolveDualCoordinateIndexes(coordinateTable, out metadataCoordIndexes))
+            {
+                Console.WriteLine($"Warning: metadata file {pairMetadataPath} missing dual coordinate columns; falling back to filename parsing.");
+                coordinateTable = null;
+                metadataCoordIndexes = null;
+            }
+        }
 
-        var coordIndexes = ResolveDualCoordinateIndexes(coordinateTable, pairMetadataPath ?? path);
+        bool hasInlineCoords = TryResolveDualCoordinateIndexes(countsTable, out var inlineCoordIndexes);
 
-        string? joinKey = FindJoinKey(countsTable.Headers, coordinateTable.Headers);
+        string? joinKey = coordinateTable == null ? null : FindJoinKey(countsTable.Headers, coordinateTable.Headers);
+        var metadataLookup = coordinateTable == null || metadataCoordIndexes == null || joinKey == null
+            ? null
+            : BuildMetadataLookup(coordinateTable, metadataCoordIndexes, joinKey);
+
+        var indexedMetadata = coordinateTable == null || metadataCoordIndexes == null || joinKey != null
+            ? null
+            : BuildIndexedMetadata(coordinateTable, metadataCoordIndexes);
+
         var rows = new List<LocalizationRow>();
-        if (joinKey != null)
+        int skipped = 0;
+        int rowsRead = countsTable.Rows.Count;
+        for (int i = 0; i < countsTable.Rows.Count; i++)
         {
-            var metadataLookup = BuildMetadataLookup(coordinateTable, coordIndexes, joinKey);
-            foreach (var countRow in countsTable.Rows)
+            var countRow = countsTable.Rows[i];
+            if (!TryParseChannels(countRow, channelIndexes, out var channels))
             {
-                if (!TryGetValue(countsTable, countRow, joinKey, out var keyValue))
-                {
-                    continue;
-                }
-
-                if (!metadataLookup.TryGetValue(keyValue, out var dualCoords))
-                {
-                    continue;
-                }
-
-                rows.Add(CreateDualRow(countRow, channelIndexes, durationIndex, inferredDuration, dualCoords));
+                skipped++;
+                continue;
             }
-        }
-        else
-        {
-            int rowCount = Math.Min(countsTable.Rows.Count, coordinateTable.Rows.Count);
-            for (int i = 0; i < rowCount; i++)
+
+            double? duration = durationIndex.HasValue
+                ? ParseNullableDouble(SafeGet(countRow, durationIndex.Value))
+                : inferredDuration;
+
+            if (!TryGetDualCoords(
+                    countRow,
+                    i,
+                    countsTable,
+                    fileNameIndex,
+                    inlineCoordIndexes,
+                    metadataLookup,
+                    indexedMetadata,
+                    joinKey,
+                    out var dualCoords))
             {
-                var dualCoords = ParseDualCoords(coordinateTable.Rows[i], coordIndexes);
-                rows.Add(CreateDualRow(countsTable.Rows[i], channelIndexes, durationIndex, inferredDuration, dualCoords));
+                skipped++;
+                continue;
             }
+
+            rows.Add(new LocalizationRow
+            {
+                Channels = channels,
+                DurationSeconds = duration,
+                IsDual = true,
+                DualCoordinates = dualCoords
+            });
         }
 
-        return rows;
+        return new LoadResult(rows, rowsRead, rows.Count, skipped);
     }
 
-    private static IReadOnlyList<LocalizationRow> LoadSingleInternal(string path, double? fallbackDuration)
+    private static LoadResult LoadSingleInternal(string path, double? fallbackDuration)
     {
         var table = LoadTable(path);
         if (table.Rows.Count == 0)
         {
-            return Array.Empty<LocalizationRow>();
+            return new LoadResult(new List<LocalizationRow>(), 0, 0, 0);
         }
 
         var channelIndexes = ResolveChannelIndexes(table, path);
@@ -942,33 +1022,24 @@ internal static class DatasetLoader
         }
 
         var rows = new List<LocalizationRow>();
+        int skipped = 0;
+        int rowsRead = table.Rows.Count;
         foreach (var cols in table.Rows)
         {
-            double[] channels = new double[FeatureBuilder.ChannelCount];
-            for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
+            if (!TryParseChannels(cols, channelIndexes, out var channels))
             {
-                channels[i] = ParseDouble(SafeGet(cols, channelIndexes[i]));
+                skipped++;
+                continue;
             }
 
             double? duration = durationIndex.HasValue
                 ? ParseNullableDouble(SafeGet(cols, durationIndex.Value))
                 : inferredDuration;
 
-            var single = new double[3];
-            if (hasExplicitCoords)
+            if (!TryGetSingleCoords(cols, hasExplicitCoords, xIndex, yIndex, zIndex, fileNameIndex, out var single))
             {
-                single[0] = ParseDouble(SafeGet(cols, xIndex!.Value));
-                single[1] = ParseDouble(SafeGet(cols, yIndex!.Value));
-                single[2] = ParseDouble(SafeGet(cols, zIndex!.Value));
-            }
-            else
-            {
-                var rawFileName = SafeGet(cols, fileNameIndex!.Value);
-                if (!TryParseSingleCoordsFromFileName(rawFileName, out single[0], out single[1], out single[2]))
-                {
-                    Console.WriteLine($"Warning: Unable to parse coordinates from file name '{rawFileName}'. Skipping row.");
-                    continue;
-                }
+                skipped++;
+                continue;
             }
             rows.Add(new LocalizationRow
             {
@@ -979,28 +1050,7 @@ internal static class DatasetLoader
             });
         }
 
-        return rows;
-    }
-
-    private static LocalizationRow CreateDualRow(string[] cols, int[] channelIndexes, int? durationIndex, double? inferredDuration, double[] dualCoords)
-    {
-        double[] channels = new double[FeatureBuilder.ChannelCount];
-        for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
-        {
-            channels[i] = ParseDouble(SafeGet(cols, channelIndexes[i]));
-        }
-
-        double? duration = durationIndex.HasValue
-            ? ParseNullableDouble(SafeGet(cols, durationIndex.Value))
-            : inferredDuration;
-
-        return new LocalizationRow
-        {
-            Channels = channels,
-            DurationSeconds = duration,
-            IsDual = true,
-            DualCoordinates = dualCoords
-        };
+        return new LoadResult(rows, rowsRead, rows.Count, skipped);
     }
 
     private static int[] ResolveChannelIndexes(Table table, string path)
@@ -1057,15 +1107,37 @@ internal static class DatasetLoader
         return new[] { x1Index.Value, y1Index.Value, z1Index.Value, x2Index.Value, y2Index.Value, z2Index.Value };
     }
 
-    private static double[] ParseDualCoords(string[] cols, int[] coordIndexes)
+    private static bool TryResolveDualCoordinateIndexes(Table table, out int[] coordIndexes)
     {
-        var dual = new double[6];
-        for (int i = 0; i < coordIndexes.Length; i++)
+        int? x1Index = TryGetIndex(table.HeaderMap, "x1");
+        int? y1Index = TryGetIndex(table.HeaderMap, "y1");
+        int? z1Index = TryGetIndex(table.HeaderMap, "z1");
+        int? x2Index = TryGetIndex(table.HeaderMap, "x2");
+        int? y2Index = TryGetIndex(table.HeaderMap, "y2");
+        int? z2Index = TryGetIndex(table.HeaderMap, "z2");
+
+        if (!x1Index.HasValue || !y1Index.HasValue || !z1Index.HasValue || !x2Index.HasValue || !y2Index.HasValue || !z2Index.HasValue)
         {
-            dual[i] = ParseDouble(SafeGet(cols, coordIndexes[i]));
+            coordIndexes = Array.Empty<int>();
+            return false;
         }
 
-        return dual;
+        coordIndexes = new[] { x1Index.Value, y1Index.Value, z1Index.Value, x2Index.Value, y2Index.Value, z2Index.Value };
+        return true;
+    }
+
+    private static bool TryParseDualCoords(string[] cols, int[] coordIndexes, out double[] coords)
+    {
+        coords = new double[6];
+        for (int i = 0; i < coordIndexes.Length; i++)
+        {
+            if (!TryParseDouble(SafeGet(cols, coordIndexes[i]), out coords[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static Dictionary<string, double[]> BuildMetadataLookup(Table table, int[] coordIndexes, string joinKey)
@@ -1078,10 +1150,31 @@ internal static class DatasetLoader
                 continue;
             }
 
-            lookup[key] = ParseDualCoords(row, coordIndexes);
+            if (TryParseDualCoords(row, coordIndexes, out var coords))
+            {
+                lookup[key] = coords;
+            }
         }
 
         return lookup;
+    }
+
+    private static List<double[]?> BuildIndexedMetadata(Table table, int[] coordIndexes)
+    {
+        var list = new List<double[]?>(table.Rows.Count);
+        foreach (var row in table.Rows)
+        {
+            if (TryParseDualCoords(row, coordIndexes, out var coords))
+            {
+                list.Add(coords);
+            }
+            else
+            {
+                list.Add(null);
+            }
+        }
+
+        return list;
     }
 
     private static string? FindJoinKey(string[] countHeaders, string[] metadataHeaders)
@@ -1160,6 +1253,11 @@ internal static class DatasetLoader
         return double.Parse(value, NumberStyles.Any, CultureInfo.InvariantCulture);
     }
 
+    private static bool TryParseDouble(string value, out double result)
+    {
+        return double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+    }
+
     private static double? ParseNullableDouble(string value)
     {
         return double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var result) ? result : null;
@@ -1192,6 +1290,37 @@ internal static class DatasetLoader
             && double.TryParse(matches[3].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out z);
     }
 
+    private static bool TryParseDualCoordsFromFileName(string fileName, out double[] dualCoords)
+    {
+        dualCoords = new double[6];
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        var baseName = Path.GetFileName(fileName.Trim());
+        var matches = Regex.Matches(baseName, @"[-+]?\d+(?:\.\d+)?", RegexOptions.CultureInvariant);
+        if (matches.Count < 7)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(matches[0].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < 6; i++)
+        {
+            if (!double.TryParse(matches[i + 1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out dualCoords[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static double? InferDurationFromName(string path)
     {
         var name = Path.GetFileNameWithoutExtension(path);
@@ -1212,5 +1341,98 @@ internal static class DatasetLoader
         public Dictionary<string, int> HeaderMap { get; } = Headers
             .Select((h, idx) => (Header: h.Trim(), Index: idx))
             .ToDictionary(h => h.Header, h => h.Index, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseChannels(string[] cols, int[] channelIndexes, out double[] channels)
+    {
+        channels = new double[FeatureBuilder.ChannelCount];
+        for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
+        {
+            if (!TryParseDouble(SafeGet(cols, channelIndexes[i]), out channels[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryGetSingleCoords(
+        string[] cols,
+        bool hasExplicitCoords,
+        int? xIndex,
+        int? yIndex,
+        int? zIndex,
+        int? fileNameIndex,
+        out double[] single)
+    {
+        single = new double[3];
+        if (hasExplicitCoords
+            && TryParseDouble(SafeGet(cols, xIndex!.Value), out single[0])
+            && TryParseDouble(SafeGet(cols, yIndex!.Value), out single[1])
+            && TryParseDouble(SafeGet(cols, zIndex!.Value), out single[2]))
+        {
+            return true;
+        }
+
+        if (fileNameIndex.HasValue)
+        {
+            var rawFileName = SafeGet(cols, fileNameIndex.Value);
+            return TryParseSingleCoordsFromFileName(rawFileName, out single[0], out single[1], out single[2]);
+        }
+
+        return false;
+    }
+
+    private static bool TryGetDualCoords(
+        string[] countRow,
+        int rowIndex,
+        Table countsTable,
+        int? fileNameIndex,
+        int[]? inlineCoordIndexes,
+        Dictionary<string, double[]>? metadataLookup,
+        List<double[]?>? indexedMetadata,
+        string? joinKey,
+        out double[] dualCoords)
+    {
+        dualCoords = Array.Empty<double>();
+
+        if (metadataLookup != null && joinKey != null)
+        {
+            if (TryGetValue(countsTable, countRow, joinKey, out var keyValue)
+                && metadataLookup.TryGetValue(keyValue, out var metadataCoords))
+            {
+                dualCoords = metadataCoords;
+                return true;
+            }
+        }
+        else if (indexedMetadata != null && rowIndex < indexedMetadata.Count)
+        {
+            var coords = indexedMetadata[rowIndex];
+            if (coords != null)
+            {
+                dualCoords = coords;
+                return true;
+            }
+        }
+
+        if (inlineCoordIndexes != null && inlineCoordIndexes.Length == 6
+            && TryParseDualCoords(countRow, inlineCoordIndexes, out var inlineCoords))
+        {
+            dualCoords = inlineCoords;
+            return true;
+        }
+
+        if (fileNameIndex.HasValue)
+        {
+            var rawFileName = SafeGet(countRow, fileNameIndex.Value);
+            if (TryParseDualCoordsFromFileName(rawFileName, out var parsed))
+            {
+                dualCoords = parsed;
+                return true;
+            }
+        }
+
+        return false;
     }
 }
