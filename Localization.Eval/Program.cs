@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Localization.ML;
@@ -181,7 +180,7 @@ internal static class Program
             new[] { "Median", "90th percentile" });
 
         var outputPath = Path.Combine(outputDir, "single_source_error_cdf.png");
-        var exporter = new PngExporter { Width = 900, Height = 600, Background = OxyColors.White };
+        var exporter = new PngExporter { Width = 900, Height = 600 };
         using (var stream = File.Open(outputPath, FileMode.Create))
         {
             exporter.Export(model, stream);
@@ -268,7 +267,7 @@ internal static class Program
 
         var model = BuildDualCdfModel(idErrors, oodErrors);
         var outputPath = Path.Combine(outputDir, "dual_source_error_cdf_ood.png");
-        var exporter = new PngExporter { Width = 900, Height = 600, Background = OxyColors.White };
+        var exporter = new PngExporter { Width = 900, Height = 600 };
         using (var stream = File.Open(outputPath, FileMode.Create))
         {
             exporter.Export(model, stream);
@@ -295,7 +294,6 @@ internal static class Program
         model.Series.Add(diagonal);
         model.Series.Add(opSeries);
         model.IsLegendVisible = true;
-        model.LegendPosition = LegendPosition.BottomRight;
         return model;
     }
 
@@ -314,7 +312,6 @@ internal static class Program
         model.Series.Add(series);
         model.Series.Add(opSeries);
         model.IsLegendVisible = true;
-        model.LegendPosition = LegendPosition.BottomLeft;
         return model;
     }
 
@@ -387,7 +384,6 @@ internal static class Program
         }
 
         model.IsLegendVisible = true;
-        model.LegendPosition = LegendPosition.BottomRight;
         return model;
     }
 
@@ -482,7 +478,7 @@ internal static class Program
 
     private static SKBitmap RenderToBitmap(PlotModel model, int width, int height)
     {
-        var exporter = new PngExporter { Width = width, Height = height, Background = OxyColors.White };
+        var exporter = new PngExporter { Width = width, Height = height };
         using var stream = new MemoryStream();
         exporter.Export(model, stream);
         stream.Position = 0;
@@ -818,8 +814,7 @@ internal static class Program
             .Where(path =>
             {
                 var extension = Path.GetExtension(path);
-                if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(extension, ".xlsx", StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }
@@ -1113,9 +1108,9 @@ internal static class DatasetLoader
     private static Table LoadTable(string path)
     {
         var extension = Path.GetExtension(path);
-        if (string.Equals(extension, ".xlsx", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
         {
-            return LoadExcelTable(path);
+            throw new NotSupportedException("Excel input not supported; use CSV.");
         }
 
         return LoadCsvTable(path);
@@ -1144,34 +1139,6 @@ internal static class DatasetLoader
         return new Table(headers, rows);
     }
 
-    private static Table LoadExcelTable(string path)
-    {
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        using var reader = ExcelReaderFactory.CreateReader(stream);
-        using var dataSet = reader.AsDataSet();
-
-        if (dataSet.Tables.Count == 0)
-        {
-            return new Table(Array.Empty<string>(), new List<string[]>());
-        }
-
-        var table = dataSet.Tables[0];
-        if (table.Rows.Count == 0)
-        {
-            return new Table(Array.Empty<string>(), new List<string[]>());
-        }
-
-        var headers = table.Rows[0].ItemArray.Select(cell => (cell?.ToString() ?? string.Empty).Trim()).ToArray();
-        var rows = new List<string[]>();
-        for (int i = 1; i < table.Rows.Count; i++)
-        {
-            var row = table.Rows[i].ItemArray.Select(cell => cell?.ToString() ?? string.Empty).ToArray();
-            rows.Add(row);
-        }
-
-        return new Table(headers, rows);
-    }
 
     private static int? TryGetIndex(Dictionary<string, int> headerMap, string name)
     {
