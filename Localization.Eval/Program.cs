@@ -40,6 +40,10 @@ internal static class Program
     public static int Main(string[] args)
     {
         var (dataDir, artifactsDir, outputDir, durationOverride) = ParseArgs(args);
+        Console.WriteLine($"DataDir={Path.GetFullPath(dataDir)}");
+        Console.WriteLine($"ArtifactsDir={Path.GetFullPath(artifactsDir)}");
+        Console.WriteLine($"OutputDir={Path.GetFullPath(outputDir)}");
+        PrintCsvPreflight(dataDir);
         Directory.CreateDirectory(outputDir);
 
         var configPath = Path.Combine(artifactsDir, "pipeline_config.json");
@@ -729,15 +733,15 @@ internal static class Program
         {
             if (arg.StartsWith("--data-dir=", StringComparison.OrdinalIgnoreCase))
             {
-                dataDir = arg.Substring("--data-dir=".Length);
+                dataDir = StripSurroundingQuotes(arg.Substring("--data-dir=".Length));
             }
             else if (arg.StartsWith("--artifacts-dir=", StringComparison.OrdinalIgnoreCase))
             {
-                artifactsDir = arg.Substring("--artifacts-dir=".Length);
+                artifactsDir = StripSurroundingQuotes(arg.Substring("--artifacts-dir=".Length));
             }
             else if (arg.StartsWith("--output-dir=", StringComparison.OrdinalIgnoreCase))
             {
-                outputDir = arg.Substring("--output-dir=".Length);
+                outputDir = StripSurroundingQuotes(arg.Substring("--output-dir=".Length));
             }
             else if (arg.StartsWith("--duration=", StringComparison.OrdinalIgnoreCase))
             {
@@ -753,17 +757,14 @@ internal static class Program
         var rows = new List<LocalizationRow>();
         foreach (var group in SingleGroups)
         {
-            var files = FindFilesByPrefix(dataDir, group);
-            if (files.Count == 0)
+            var path = Path.Combine(dataDir, $"{group}.csv");
+            if (!File.Exists(path))
             {
-                Console.WriteLine($"Warning: missing single-source group {group}");
+                Console.WriteLine($"Warning: missing single-source group {group} (expected {Path.GetFullPath(path)})");
                 continue;
             }
 
-            foreach (var file in files)
-            {
-                rows.AddRange(DatasetLoader.LoadSingleSource(file, durationOverride));
-            }
+            rows.AddRange(DatasetLoader.LoadSingleSource(path, durationOverride));
         }
 
         return rows;
@@ -774,10 +775,10 @@ internal static class Program
         var list = new List<LocalizationRow>();
         foreach (var group in DualGroups)
         {
-            var countFiles = FindFilesByPrefix(dataDir, group);
-            if (countFiles.Count == 0)
+            var countsPath = Path.Combine(dataDir, $"{group}.csv");
+            if (!File.Exists(countsPath))
             {
-                Console.WriteLine($"Warning: missing dual-source group {group}");
+                Console.WriteLine($"Warning: missing dual-source group {group} (expected {Path.GetFullPath(countsPath)})");
                 continue;
             }
 
@@ -787,45 +788,54 @@ internal static class Program
                 continue;
             }
 
-            var metadataFiles = FindFilesByPrefix(dataDir, metadataPrefix);
-            if (metadataFiles.Count == 0)
+            var metadataPath = Path.Combine(dataDir, $"{metadataPrefix}.csv");
+            if (!File.Exists(metadataPath))
             {
-                Console.WriteLine($"Warning: missing pair metadata group {metadataPrefix} for dual group {group}");
+                Console.WriteLine($"Warning: missing pair metadata group {metadataPrefix} for dual group {group} (expected {Path.GetFullPath(metadataPath)})");
                 continue;
             }
 
-            if (metadataFiles.Count > 1)
-            {
-                Console.WriteLine($"Warning: multiple metadata files found for {metadataPrefix}; using {metadataFiles[0]}");
-            }
-
-            foreach (var countFile in countFiles)
-            {
-                list.AddRange(DatasetLoader.LoadDualSource(countFile, metadataFiles[0], durationOverride));
-            }
+            list.AddRange(DatasetLoader.LoadDualSource(countsPath, metadataPath, durationOverride));
         }
 
         return list;
     }
 
-    private static List<string> FindFilesByPrefix(string dataDir, string prefix)
+    private static void PrintCsvPreflight(string dataDir)
     {
-        var files = Directory.EnumerateFiles(dataDir)
-            .Where(path =>
-            {
-                var extension = Path.GetExtension(path);
-                if (!string.Equals(extension, ".csv", StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
+        if (!Directory.Exists(dataDir))
+        {
+            Console.WriteLine($"Warning: data directory not found: {Path.GetFullPath(dataDir)}");
+            return;
+        }
 
-                var name = Path.GetFileNameWithoutExtension(path);
-                return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-            })
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+        var files = Directory.EnumerateFiles(dataDir, "*.csv")
+            .Select(Path.GetFileName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return files;
+        Console.WriteLine($"DataDir CSV files ({files.Count}):");
+        foreach (var file in files)
+        {
+            Console.WriteLine($"  {file}");
+        }
+    }
+
+    private static string StripSurroundingQuotes(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        if ((value.StartsWith("\"", StringComparison.Ordinal) && value.EndsWith("\"", StringComparison.Ordinal))
+            || (value.StartsWith("'", StringComparison.Ordinal) && value.EndsWith("'", StringComparison.Ordinal)))
+        {
+            return value.Substring(1, value.Length - 2);
+        }
+
+        return value;
     }
 
     private sealed record RocPoint(double FalsePositiveRate, double TruePositiveRate);
