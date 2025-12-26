@@ -215,9 +215,9 @@ internal static class Program
             CrossValidationAccuracyStd = cv.Std,
             RandomLabelAccuracy = randomCheck,
             SingleRegressorR2 = singleR2,
-            GroupedHoldoutSingleRegressor = !useGroupedSplit || double.IsNaN(groupedSingleR2) ? null : new RegressionMetrics { R2 = groupedSingleR2 },
+            GroupedHoldoutSingleRegressor = !useGroupedSplit || double.IsNaN(groupedSingleR2) ? null : new RegressionHoldoutSummary { R2 = groupedSingleR2 },
             DualRegressorR2 = dualR2,
-            GroupedHoldoutDualRegressor = !useGroupedSplit || double.IsNaN(groupedDualR2) ? null : new RegressionMetrics { R2 = groupedDualR2 },
+            GroupedHoldoutDualRegressor = !useGroupedSplit || double.IsNaN(groupedDualR2) ? null : new RegressionHoldoutSummary { R2 = groupedDualR2 },
             FeatureImportance = featureImportances,
             Calibration = calibrationReport
         };
