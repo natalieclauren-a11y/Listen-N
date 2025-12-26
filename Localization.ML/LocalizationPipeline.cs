@@ -17,8 +17,9 @@ public sealed class LocalizationPipeline
     private readonly RegressionModelGroup _dualRegressor;
     private readonly MahalanobisScorer _mahalanobis;
     private readonly PipelineConfiguration _config;
+    private readonly CalibrationModel _calibrationModel;
 
-    public LocalizationPipeline(MLContext mlContext, FeatureBuilder featureBuilder, ITransformer classifier, RegressionModelGroup singleRegressor, RegressionModelGroup dualRegressor, MahalanobisScorer mahalanobis, PipelineConfiguration config)
+    public LocalizationPipeline(MLContext mlContext, FeatureBuilder featureBuilder, ITransformer classifier, RegressionModelGroup singleRegressor, RegressionModelGroup dualRegressor, MahalanobisScorer mahalanobis, PipelineConfiguration config, CalibrationModel? calibrationModel = null)
     {
         _mlContext = mlContext;
         _featureBuilder = featureBuilder;
@@ -27,6 +28,7 @@ public sealed class LocalizationPipeline
         _dualRegressor = dualRegressor;
         _mahalanobis = mahalanobis;
         _config = config;
+        _calibrationModel = calibrationModel ?? CalibrationModel.Identity();
     }
 
     public PredictionResult Predict(LocalizationRow row)
@@ -43,6 +45,8 @@ public sealed class LocalizationPipeline
             Features = features.FeatureVector.Select(f => (float)f).ToArray()
         });
 
+        double calibratedProbability = _calibrationModel.Apply(classPrediction.Probability);
+
         string label = classPrediction.PredictedLabel ? "Dual" : "Single";
         double[] coords = classPrediction.PredictedLabel
             ? _dualRegressor.Predict(features.FeatureVector.Select(f => (float)f).ToArray())
@@ -53,7 +57,7 @@ public sealed class LocalizationPipeline
             var first = coords.Take(3).ToArray();
             var second = coords.Skip(3).Take(3).ToArray();
             double separation = Math.Sqrt(first.Zip(second).Sum(p => Math.Pow(p.First - p.Second, 2)));
-            if (separation < _config.MinimumSeparationCm && classPrediction.Probability < _config.StrictProbability)
+            if (separation < _config.MinimumSeparationCm && calibratedProbability < _config.StrictProbability)
             {
                 coords = _singleRegressor.Predict(features.FeatureVector.Select(f => (float)f).ToArray());
                 label = "Single (centroid override)";
@@ -64,13 +68,15 @@ public sealed class LocalizationPipeline
         {
             Label = isOod ? "Unknown" : label,
             Coordinates = coords,
-            Probability = classPrediction.Probability,
+            Probability = calibratedProbability,
             RawClassification = classPrediction,
             Diagnostics = new PredictionDiagnostics
             {
                 MahalanobisDistance = distance,
                 IsOutOfDistribution = isOod,
-                FeatureNames = _featureBuilder.FeatureNames
+                FeatureNames = _featureBuilder.FeatureNames,
+                RawProbability = classPrediction.Probability,
+                CalibratedProbability = calibratedProbability
             }
         };
     }
@@ -105,6 +111,9 @@ public sealed class LocalizationPipeline
             }
         };
         File.WriteAllText(Path.Combine(directory, "mahalanobis.json"), JsonSerializer.Serialize(mahaModel, new JsonSerializerOptions { WriteIndented = true }));
+
+        var calibrationPath = Path.Combine(directory, "calibration.json");
+        File.WriteAllText(calibrationPath, JsonSerializer.Serialize(_calibrationModel, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     public static LocalizationPipeline Load(string directory, MLContext? mlContext = null)
@@ -137,7 +146,14 @@ public sealed class LocalizationPipeline
             }
         }
 
-        return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config);
+        CalibrationModel calibrationModel = CalibrationModel.Identity();
+        var calibrationPath = Path.Combine(directory, "calibration.json");
+        if (File.Exists(calibrationPath))
+        {
+            calibrationModel = JsonSerializer.Deserialize<CalibrationModel>(File.ReadAllText(calibrationPath)) ?? CalibrationModel.Identity();
+        }
+
+        return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config, calibrationModel);
     }
 
     private static double[] ExtractOodFeatures(IReadOnlyList<double> features)

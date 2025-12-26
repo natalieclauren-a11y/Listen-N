@@ -51,6 +51,8 @@ public sealed class PredictionDiagnostics
     public double MahalanobisDistance { get; init; }
     public bool IsOutOfDistribution { get; init; }
     public IReadOnlyList<string> FeatureNames { get; init; } = Array.Empty<string>();
+    public double RawProbability { get; init; }
+    public double CalibratedProbability { get; init; }
 }
 
 public sealed class PredictionResult
@@ -75,6 +77,7 @@ public sealed class TrainingSummary
     public required double SingleRegressorR2 { get; init; }
     public required double DualRegressorR2 { get; init; }
     public required IReadOnlyList<(string Feature, double Gain)> FeatureImportance { get; init; }
+    public CalibrationReport? Calibration { get; init; }
 }
 
 public sealed class PipelineConfiguration
@@ -86,4 +89,14 @@ public sealed class PipelineConfiguration
     public IReadOnlyList<string> FeatureNames { get; set; } = Array.Empty<string>();
     public IReadOnlyList<double> DipolePositions { get; set; } = Array.Empty<double>();
     public TrainingSummary? TrainingSummary { get; set; }
+    public CalibrationReport? Calibration { get; set; }
+}
+
+public sealed class CalibrationReport
+{
+    public string CalibratorType { get; init; } = string.Empty;
+    public double BrierScoreRaw { get; init; }
+    public double BrierScoreCalibrated { get; init; }
+    public double? ExpectedCalibrationError { get; init; }
+    public int ReliabilityBinCount { get; init; }
 }
