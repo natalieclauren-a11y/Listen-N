@@ -7,6 +7,10 @@ using System.Text.Json;
 using Microsoft.ML;
 using Microsoft.ML.Trainers.FastTree;
 using Localization.ML;
+using OxyPlot;
+using OxyPlot.Axes;
+using OxyPlot.Series;
+using OxyPlot.SkiaSharp;
 
 namespace Localization.Train;
 
@@ -55,9 +59,41 @@ internal static class Program
             throw new InvalidOperationException("No training rows loaded. Check --data-dir and available dataset groups.");
         }
 
-        var (classifierHoldoutModel, metrics, importances) = trainer.TrainClassifier(classificationExamples);
+        const int reliabilityBins = 10;
+        const CalibrationKind calibratorChoice = CalibrationKind.Isotonic;
+
+        var split = StratifiedThreeWaySplit(classificationExamples, calibrationFraction: 0.2, testFraction: 0.2, seed: 42);
+        var (classifierHoldoutModel, metrics, importances) = trainer.TrainClassifier(split.Train, split.Test);
         var cv = trainer.CrossValidateClassifier(classificationExamples);
         var randomCheck = trainer.RandomLabelSanityCheck(classificationExamples);
+
+        var calibrationEngine = trainer.MlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(classifierHoldoutModel);
+        var calibrationSamples = split.Calibration.Select(example =>
+        {
+            var prediction = calibrationEngine.Predict(example);
+            return (Probability: (double)prediction.Probability, Label: example.Label);
+        }).ToList();
+
+        CalibrationModel calibrationModel = calibratorChoice switch
+        {
+            CalibrationKind.Platt => CalibrationModel.FitPlatt(calibrationSamples, reliabilityBins),
+            CalibrationKind.Isotonic => CalibrationModel.FitIsotonic(calibrationSamples, reliabilityBins),
+            _ => CalibrationModel.Identity(reliabilityBins)
+        };
+
+        var testPredictions = new List<(double Raw, double Calibrated, bool Label)>();
+        foreach (var example in split.Test)
+        {
+            var prediction = calibrationEngine.Predict(example);
+            double raw = prediction.Probability;
+            double calibrated = calibrationModel.Apply(raw);
+            testPredictions.Add((raw, calibrated, example.Label));
+        }
+
+        var brierRaw = CalibrationModel.ComputeBrierScore(testPredictions.Select(p => (p.Raw, p.Label)));
+        var brierCalibrated = CalibrationModel.ComputeBrierScore(testPredictions.Select(p => (p.Calibrated, p.Label)));
+        var ece = CalibrationModel.ComputeExpectedCalibrationError(testPredictions.Select(p => (p.Calibrated, p.Label)), reliabilityBins, p => p);
+        var reliability = CalibrationModel.BuildReliabilityBins(testPredictions.Select(p => (p.Calibrated, p.Label)), reliabilityBins);
 
         Console.WriteLine("Classifier holdout metrics:");
         Console.WriteLine($"  Accuracy: {metrics.Accuracy:F3}");
@@ -77,19 +113,24 @@ internal static class Program
             Console.WriteLine($"  {item.Feature}: {item.Gain:F5}");
         }
 
-        // Train classifier on full data for saving
-        var classifierPipeline = trainer.MlContext.BinaryClassification.Trainers.FastForest(
-            new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
-            {
-                NumberOfTrees = 200,
-                NumberOfLeaves = 64,
-                LabelColumnName = nameof(ClassificationExample.Label),
-                FeatureColumnName = nameof(ClassificationExample.Features)
-            });
+        Console.WriteLine("Calibration holdout (raw -> calibrated | label):");
+        foreach (var sample in testPredictions.Take(5))
+        {
+            Console.WriteLine($"  {sample.Raw:F4} -> {sample.Calibrated:F4} | label={(sample.Label ? 1 : 0)}");
+        }
 
-        var classifierFull = classifierPipeline.Fit(
-            trainer.MlContext.Data.LoadFromEnumerable(classificationExamples));
 
+        var reliabilityPlot = BuildReliabilityDiagram(
+            reliability,
+            brierRaw,
+            brierCalibrated,
+            reliabilityBins,
+            calibratorChoice.ToString());
+        var reliabilityPath = Path.Combine(outputDir, "reliability_diagram.png");
+        using (var stream = File.Open(reliabilityPath, FileMode.Create))
+        {
+            new PngExporter { Width = 900, Height = 600 }.Export(reliabilityPlot, stream);
+        }
 
         // Regression datasets
         var singleFeatures = singleRows.Select(r => featureBuilder.BuildFeatures(r.Channels, r.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray()).ToList();
@@ -129,6 +170,15 @@ internal static class Program
         double oodStd = Math.Sqrt(oodDistances.Average(d => Math.Pow(d - oodMean, 2)));
         double oodThreshold = oodMean + 3 * oodStd;
 
+        var calibrationReport = new CalibrationReport
+        {
+            CalibratorType = calibratorChoice.ToString(),
+            BrierScoreRaw = brierRaw,
+            BrierScoreCalibrated = brierCalibrated,
+            ExpectedCalibrationError = ece,
+            ReliabilityBinCount = reliabilityBins
+        };
+
         var summary = new TrainingSummary
         {
             HoldoutAccuracy = metrics.Accuracy,
@@ -140,7 +190,8 @@ internal static class Program
             RandomLabelAccuracy = randomCheck,
             SingleRegressorR2 = singleR2,
             DualRegressorR2 = dualR2,
-            FeatureImportance = importances
+            FeatureImportance = importances,
+            Calibration = calibrationReport
         };
 
         var config = new PipelineConfiguration
@@ -151,10 +202,11 @@ internal static class Program
             StrictProbability = 0.98,
             FeatureNames = featureBuilder.FeatureNames,
             DipolePositions = featureBuilder.DipolePositions,
-            TrainingSummary = summary
+            TrainingSummary = summary,
+            Calibration = calibrationReport
         };
 
-        var pipeline = new LocalizationPipeline(trainer.MlContext, featureBuilder, classifierFull, singleRegressor, dualRegressor, mahalanobis, config);
+        var pipeline = new LocalizationPipeline(trainer.MlContext, featureBuilder, classifierHoldoutModel, singleRegressor, dualRegressor, mahalanobis, config, calibrationModel);
         pipeline.Save(outputDir);
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
@@ -245,6 +297,81 @@ internal static class Program
         }
 
         return valid == 0 ? double.NaN : r2Mean / valid;
+    }
+
+    private static (IReadOnlyList<ClassificationExample> Train, IReadOnlyList<ClassificationExample> Calibration, IReadOnlyList<ClassificationExample> Test) StratifiedThreeWaySplit(IReadOnlyList<ClassificationExample> data, double calibrationFraction, double testFraction, int seed)
+    {
+        var grouped = data.GroupBy(d => d.Label).ToDictionary(g => g.Key, g => g.ToList());
+        var train = new List<ClassificationExample>();
+        var calibration = new List<ClassificationExample>();
+        var test = new List<ClassificationExample>();
+        var rnd = new Random(seed);
+
+        foreach (var kvp in grouped)
+        {
+            var shuffled = kvp.Value.OrderBy(_ => rnd.Next()).ToList();
+            int calibCount = (int)Math.Round(shuffled.Count * calibrationFraction);
+            int testCount = (int)Math.Round(shuffled.Count * testFraction);
+            calibCount = Math.Min(calibCount, shuffled.Count);
+            testCount = Math.Min(testCount, Math.Max(0, shuffled.Count - calibCount));
+
+            calibration.AddRange(shuffled.Take(calibCount));
+            test.AddRange(shuffled.Skip(calibCount).Take(testCount));
+            train.AddRange(shuffled.Skip(calibCount + testCount));
+        }
+
+        return (train, calibration, test);
+    }
+
+    private static PlotModel BuildReliabilityDiagram(IReadOnlyList<ReliabilityBin> bins, double brierRaw, double brierCalibrated, int binCount, string calibrator)
+    {
+        var model = new PlotModel
+        {
+            Title = $"Reliability Diagram (raw={brierRaw:F3}, calibrated={brierCalibrated:F3})",
+            Subtitle = $"Calibrator: {calibrator}, Bins={binCount}"
+        };
+
+        model.Axes.Add(new LinearAxis
+        {
+            Position = AxisPosition.Bottom,
+            Minimum = 0,
+            Maximum = 1,
+            Title = "Mean predicted probability"
+        });
+
+        model.Axes.Add(new LinearAxis
+        {
+            Position = AxisPosition.Left,
+            Minimum = 0,
+            Maximum = 1,
+            Title = "Observed fraction positive"
+        });
+
+        var ideal = new LineSeries
+        {
+            Color = OxyColors.Gray,
+            StrokeThickness = 1.5,
+            LineStyle = LineStyle.Dash
+        };
+        ideal.Points.Add(new DataPoint(0, 0));
+        ideal.Points.Add(new DataPoint(1, 1));
+        model.Series.Add(ideal);
+
+        var series = new LineSeries
+        {
+            Color = OxyColors.SteelBlue,
+            MarkerType = MarkerType.Circle,
+            MarkerSize = 4,
+            StrokeThickness = 2
+        };
+
+        foreach (var bin in bins.Where(b => !double.IsNaN(b.MeanPredictedProbability) && !double.IsNaN(b.EmpiricalFraction)))
+        {
+            series.Points.Add(new DataPoint(bin.MeanPredictedProbability, bin.EmpiricalFraction));
+        }
+
+        model.Series.Add(series);
+        return model;
     }
 
     private static float[] ExtractOodVector(IReadOnlyList<float> features)

@@ -24,12 +24,20 @@ public sealed class ModelTrainer
     public FeatureBuilder FeatureBuilder => _featureBuilder;
     public MLContext MlContext => _mlContext;
 
-    public (ITransformer Model, BinaryClassificationMetrics Metrics, IReadOnlyList<(string Feature, double Gain)> Importances) TrainClassifier(IReadOnlyList<ClassificationExample> data, int permutationCount = 5)
+    public (ITransformer Model, BinaryClassificationMetrics Metrics, IReadOnlyList<(string Feature, double Gain)> Importances) TrainClassifier(IReadOnlyList<ClassificationExample> trainData, IReadOnlyList<ClassificationExample>? evaluationData = null, int permutationCount = 5)
     {
-        var split = StratifiedSplit(data, 0.25);
-        var trainData = _mlContext.Data.LoadFromEnumerable(split.Train);
-        var testData = _mlContext.Data.LoadFromEnumerable(split.Test);
-        var testList = split.Test.ToList();
+        IReadOnlyList<ClassificationExample> train = trainData;
+        IReadOnlyList<ClassificationExample> test = evaluationData ?? Array.Empty<ClassificationExample>();
+        if (evaluationData is null)
+        {
+            var split = StratifiedSplit(trainData, 0.25);
+            train = split.Train;
+            test = split.Test;
+        }
+
+        var trainView = _mlContext.Data.LoadFromEnumerable(train);
+        var testView = _mlContext.Data.LoadFromEnumerable(test);
+        var testList = test.ToList();
 
         var pipeline = _mlContext.BinaryClassification.Trainers.FastForest(new Microsoft.ML.Trainers.FastTree.FastForestBinaryTrainer.Options
 
@@ -40,8 +48,8 @@ public sealed class ModelTrainer
             FeatureColumnName = nameof(ClassificationExample.Features)
         }).Append(_mlContext.BinaryClassification.Calibrators.Platt());
 
-        var model = pipeline.Fit(trainData);
-        var predictions = model.Transform(testData);
+        var model = pipeline.Fit(trainView);
+        var predictions = model.Transform(testView);
         var metrics = _mlContext.BinaryClassification.Evaluate(predictions, labelColumnName: nameof(ClassificationExample.Label));
         var baselineAuc = metrics.AreaUnderRocCurve;
 
