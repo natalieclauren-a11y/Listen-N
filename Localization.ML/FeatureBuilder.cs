@@ -49,6 +49,40 @@ public sealed class FeatureBuilder
 
     public FeatureComputationResult BuildFeatures(IReadOnlyList<double> channels, double? durationSeconds = null)
     {
+        return BuildFeaturesInternal(channels, durationSeconds);
+    }
+
+    public FeatureComputationResult BuildFeaturesWithPermutation(
+        IReadOnlyList<double> channels,
+        IReadOnlyList<int> permutation,
+        double? durationSeconds = null)
+    {
+        if (permutation == null)
+        {
+            throw new ArgumentNullException(nameof(permutation));
+        }
+
+        if (permutation.Count != ChannelCount)
+        {
+            throw new ArgumentException($"Permutation must have {ChannelCount} entries", nameof(permutation));
+        }
+
+        if (permutation.Distinct().Count() != ChannelCount || permutation.Any(i => i < 0 || i >= ChannelCount))
+        {
+            throw new ArgumentException("Permutation must be a re-ordering of channel indices 0..14", nameof(permutation));
+        }
+
+        var permuted = new double[ChannelCount];
+        for (int i = 0; i < ChannelCount; i++)
+        {
+            permuted[i] = channels[permutation[i]];
+        }
+
+        return BuildFeaturesInternal(permuted, durationSeconds);
+    }
+
+    private FeatureComputationResult BuildFeaturesInternal(IReadOnlyList<double> channels, double? durationSeconds)
+    {
         if (channels == null)
         {
             throw new ArgumentNullException(nameof(channels));
