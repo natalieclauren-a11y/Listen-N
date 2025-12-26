@@ -92,16 +92,16 @@ internal static class Program
             var groupedSplitData = Grouping.GroupSplit(allRows, 0.2, 42);
             groupedSplit = (groupedSplitData.Train, groupedSplitData.Holdout);
             var groupedTrain = groupedSplitData.Train.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
-            var groupedHoldout = groupedSplitData.Holdout.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+            var groupedHoldoutExamples = groupedSplitData.Holdout.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
 
-            if (groupedTrain.Count == 0 || groupedHoldout.Count == 0)
+            if (groupedTrain.Count == 0 || groupedHoldoutExamples.Count == 0)
             {
                 Console.WriteLine("Warning: grouped split produced empty train or holdout set; skipping grouped evaluation.");
             }
             else
             {
-                var (groupedModel, groupedMetrics, groupedImportances) = trainer.TrainClassifier(groupedTrain, groupedHoldout);
-                var groupedPredictions = BuildPredictions(trainer, groupedModel, groupedHoldout);
+                var (groupedModel, groupedMetrics, groupedImportances) = trainer.TrainClassifier(groupedTrain, groupedHoldoutExamples);
+                var groupedPredictions = BuildPredictions(trainer, groupedModel, groupedHoldoutExamples);
                 groupedSplitMetrics = BuildSplitMetrics(groupedMetrics, groupedPredictions);
                 groupedMlNetMetrics = groupedMetrics;
                 classifierHoldoutModel = groupedModel;
