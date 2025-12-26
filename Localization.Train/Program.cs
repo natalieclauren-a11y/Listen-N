@@ -41,6 +41,8 @@ internal static class Program
         { "Dual_Cf_60_Second_LMX", "pair_metadata_60" }
     };
 
+    private sealed record ErrorDiagnosticPoint(double X, double ErrorCm, string Regime);
+
     public static void Main(string[] args)
     {
         var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl) = ParseArgs(args);
@@ -83,12 +85,14 @@ internal static class Program
         ITransformer classifierHoldoutModel = rowClassifierModel;
         var featureImportances = importances;
         var holdoutPredictions = rowPredictions;
+        (IReadOnlyList<LocalizationRow> Train, IReadOnlyList<LocalizationRow> Holdout)? groupedSplit = null;
 
         if (useGroupedSplit)
         {
-            var groupedSplit = Grouping.GroupSplit(allRows, 0.2, 42);
-            var groupedTrain = groupedSplit.Train.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
-            var groupedHoldout = groupedSplit.Holdout.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+            var groupedSplitData = Grouping.GroupSplit(allRows, 0.2, 42);
+            groupedSplit = (groupedSplitData.Train, groupedSplitData.Holdout);
+            var groupedTrain = groupedSplitData.Train.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+            var groupedHoldout = groupedSplitData.Holdout.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
 
             if (groupedTrain.Count == 0 || groupedHoldout.Count == 0)
             {
@@ -288,6 +292,28 @@ internal static class Program
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"Artifacts saved to {outputDir}");
+
+        var randomHoldoutRows = split.Test.Select(t => t.Row).ToList();
+        SaveErrorDiagnostics(
+            pipeline,
+            randomHoldoutRows,
+            "Random holdout",
+            Path.Combine(outputDir, "error_vs_distance_random.png"),
+            Path.Combine(outputDir, "error_vs_counts_random.png"),
+            Path.Combine(outputDir, "error_vs_distance_random.json"),
+            Path.Combine(outputDir, "error_vs_counts_random.json"));
+
+        if (groupedSplit is { Holdout: { } groupedHoldout } && groupedHoldout.Count > 0)
+        {
+            SaveErrorDiagnostics(
+                pipeline,
+                groupedHoldout,
+                "Grouped holdout",
+                Path.Combine(outputDir, "error_vs_distance_grouped.png"),
+                Path.Combine(outputDir, "error_vs_counts_grouped.png"),
+                Path.Combine(outputDir, "error_vs_distance_grouped.json"),
+                Path.Combine(outputDir, "error_vs_counts_grouped.json"));
+        }
 
         if (runPermutationControl || runLabelShuffleControl)
         {
@@ -882,6 +908,37 @@ internal static class Program
                 permutedRandomLocalization.Routing,
                 Path.Combine(outputDir, "negative_control_channel_permutation_routing.png"));
 
+            const int diagnosticBins = 20;
+            var (baselineDistancePoints, baselineCountPoints) = BuildErrorDiagnosticPoints(pipeline, randomHoldoutRows, null);
+            var (permutedDistancePoints, permutedCountPoints) = BuildErrorDiagnosticPoints(pipeline, randomHoldoutRows, permutation);
+
+            var baselineDistanceBinned = BinDiagnostics(baselineDistancePoints, diagnosticBins);
+            var baselineCountBinned = BinDiagnostics(baselineCountPoints, diagnosticBins);
+            var permutedDistanceBinned = BinDiagnostics(permutedDistancePoints, diagnosticBins);
+            var permutedCountBinned = BinDiagnostics(permutedCountPoints, diagnosticBins);
+
+            SaveErrorVsXPlot(
+                "Negative control: localization error vs. distance (random holdout)",
+                "Distance to detector (cm)",
+                Path.Combine(outputDir, "negative_control_channel_permutation_error_vs_distance.png"),
+                baselineDistanceBinned,
+                permutedDistanceBinned);
+
+            SaveErrorVsXPlot(
+                "Negative control: localization error vs. total counts (random holdout)",
+                "Total counts",
+                Path.Combine(outputDir, "negative_control_channel_permutation_error_vs_counts.png"),
+                baselineCountBinned,
+                permutedCountBinned);
+
+            File.WriteAllText(
+                Path.Combine(outputDir, "negative_control_channel_permutation_error_vs_distance.json"),
+                JsonSerializer.Serialize(new { Baseline = baselineDistanceBinned, Perturbed = permutedDistanceBinned }, JsonWithNamedFloats));
+
+            File.WriteAllText(
+                Path.Combine(outputDir, "negative_control_channel_permutation_error_vs_counts.json"),
+                JsonSerializer.Serialize(new { Baseline = baselineCountBinned, Perturbed = permutedCountBinned }, JsonWithNamedFloats));
+
             Console.WriteLine($"[Negative control] Channel permutation artifacts written to {jsonPath}");
         }
 
@@ -1080,6 +1137,246 @@ internal static class Program
 
         double weight = position - lowerIndex;
         return sorted[lowerIndex] * (1 - weight) + sorted[upperIndex] * weight;
+    }
+
+    private static (List<ErrorDiagnosticPoint> ByDistance, List<ErrorDiagnosticPoint> ByCounts) BuildErrorDiagnosticPoints(
+        LocalizationPipeline pipeline,
+        IReadOnlyList<LocalizationRow> rows,
+        IReadOnlyList<int>? permutation)
+    {
+        var byDistance = new List<ErrorDiagnosticPoint>();
+        var byCounts = new List<ErrorDiagnosticPoint>();
+
+        foreach (var row in rows)
+        {
+            if (!row.Channels.Any())
+            {
+                continue;
+            }
+
+            var totalCounts = row.Channels.Sum();
+            if (!row.IsDual && row.SingleCoordinates is { Length: 3 } singleTruth)
+            {
+                var prediction = pipeline.Predict(row, permutation);
+                if (prediction.Coordinates.Count < 3)
+                {
+                    continue;
+                }
+
+                double distance = Math.Sqrt(singleTruth[0] * singleTruth[0] + singleTruth[1] * singleTruth[1] + singleTruth[2] * singleTruth[2]);
+                double error = Euclidean(prediction.Coordinates.Take(3).ToArray(), singleTruth);
+                byDistance.Add(new ErrorDiagnosticPoint(distance, error, "Single"));
+                byCounts.Add(new ErrorDiagnosticPoint(totalCounts, error, "Single"));
+            }
+            else if (row.IsDual && row.DualCoordinates is { Length: 6 } dualTruth)
+            {
+                var prediction = pipeline.Predict(row, permutation);
+                if (prediction.Coordinates.Count < 6)
+                {
+                    continue;
+                }
+
+                var errors = AssignmentAwareErrors(prediction.Coordinates, dualTruth);
+                double pairError = (errors.First + errors.Second) / 2.0;
+
+                double r1 = Math.Sqrt(Math.Pow(dualTruth[0], 2) + Math.Pow(dualTruth[1], 2) + Math.Pow(dualTruth[2], 2));
+                double r2 = Math.Sqrt(Math.Pow(dualTruth[3], 2) + Math.Pow(dualTruth[4], 2) + Math.Pow(dualTruth[5], 2));
+                double distance = Math.Min(r1, r2);
+
+                byDistance.Add(new ErrorDiagnosticPoint(distance, pairError, "Dual"));
+                byCounts.Add(new ErrorDiagnosticPoint(totalCounts, pairError, "Dual"));
+            }
+        }
+
+        return (byDistance, byCounts);
+    }
+
+    private static BinnedErrorSummary BinDiagnostics(IReadOnlyList<ErrorDiagnosticPoint> points, int binCount)
+    {
+        var xCenters = new List<double>();
+        var medians = new List<double>();
+        var p25 = new List<double>();
+        var p75 = new List<double>();
+        var counts = new List<int>();
+        var lowers = new List<double>();
+        var uppers = new List<double>();
+
+        if (points.Count == 0 || binCount <= 0)
+        {
+            return new BinnedErrorSummary
+            {
+                XCenter = xCenters,
+                MedianError = medians,
+                P25Error = p25,
+                P75Error = p75,
+                Counts = counts,
+                BinLower = lowers,
+                BinUpper = uppers
+            };
+        }
+
+        var sorted = points.OrderBy(p => p.X).ToList();
+        int total = sorted.Count;
+
+        for (int b = 0; b < binCount; b++)
+        {
+            int start = (int)Math.Floor(b * total / (double)binCount);
+            int end = (int)Math.Floor((b + 1) * total / (double)binCount);
+            end = Math.Min(end, total);
+
+            if (end <= start)
+            {
+                continue;
+            }
+
+            var bin = sorted.GetRange(start, end - start);
+            var xs = bin.Select(p => p.X).OrderBy(v => v).ToArray();
+            var errors = bin.Select(p => p.ErrorCm).OrderBy(v => v).ToArray();
+
+            xCenters.Add(Percentile(xs, 0.5));
+            medians.Add(Percentile(errors, 0.5));
+            p25.Add(Percentile(errors, 0.25));
+            p75.Add(Percentile(errors, 0.75));
+            counts.Add(bin.Count);
+            lowers.Add(xs.First());
+            uppers.Add(xs.Last());
+        }
+
+        return new BinnedErrorSummary
+        {
+            XCenter = xCenters,
+            MedianError = medians,
+            P25Error = p25,
+            P75Error = p75,
+            Counts = counts,
+            BinLower = lowers,
+            BinUpper = uppers
+        };
+    }
+
+    private static void SaveErrorDiagnostics(
+        LocalizationPipeline pipeline,
+        IReadOnlyList<LocalizationRow> rows,
+        string splitLabel,
+        string distancePlotPath,
+        string countsPlotPath,
+        string distanceJsonPath,
+        string countsJsonPath)
+    {
+        const int diagnosticBins = 20;
+        var (distancePoints, countPoints) = BuildErrorDiagnosticPoints(pipeline, rows, null);
+        var distanceBinned = BinDiagnostics(distancePoints, diagnosticBins);
+        var countsBinned = BinDiagnostics(countPoints, diagnosticBins);
+
+        SaveErrorVsXPlot(
+            $"Localization error vs. distance ({splitLabel})",
+            "Distance to detector (cm)",
+            distancePlotPath,
+            distanceBinned,
+            null);
+
+        SaveErrorVsXPlot(
+            $"Localization error vs. total counts ({splitLabel})",
+            "Total counts",
+            countsPlotPath,
+            countsBinned,
+            null);
+
+        File.WriteAllText(distanceJsonPath, JsonSerializer.Serialize(distanceBinned, JsonWithNamedFloats));
+        File.WriteAllText(countsJsonPath, JsonSerializer.Serialize(countsBinned, JsonWithNamedFloats));
+    }
+
+    private static void SaveErrorVsXPlot(
+        string title,
+        string xLabel,
+        string outputPath,
+        BinnedErrorSummary baseline,
+        BinnedErrorSummary? perturbed)
+    {
+        var model = new PlotModel { Title = title };
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = xLabel });
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Localization error (cm)" });
+
+        if (baseline.XCenter.Count > 0)
+        {
+            var area = new AreaSeries
+            {
+                Title = "Baseline IQR",
+                Color = OxyColor.FromAColor(60, OxyColors.SteelBlue),
+                Fill = OxyColor.FromAColor(40, OxyColors.SteelBlue),
+                StrokeThickness = 1
+            };
+
+            foreach (var point in baseline.XCenter.Zip(baseline.P75Error, (x, y) => new DataPoint(x, y)))
+            {
+                area.Points.Add(point);
+            }
+
+            for (int i = baseline.XCenter.Count - 1; i >= 0; i--)
+            {
+                area.Points2.Add(new DataPoint(baseline.XCenter[i], baseline.P25Error[i]));
+            }
+
+            model.Series.Add(area);
+
+            var medianSeries = new LineSeries
+            {
+                Title = "Baseline median",
+                StrokeThickness = 2,
+                MarkerType = MarkerType.Circle,
+                MarkerSize = 4,
+                Color = OxyColors.SteelBlue
+            };
+
+            foreach (var point in baseline.XCenter.Zip(baseline.MedianError, (x, y) => new DataPoint(x, y)))
+            {
+                medianSeries.Points.Add(point);
+            }
+
+            model.Series.Add(medianSeries);
+        }
+
+        if (perturbed != null && perturbed.XCenter.Count > 0)
+        {
+            var area = new AreaSeries
+            {
+                Title = "Perturbed IQR",
+                Color = OxyColor.FromAColor(60, OxyColors.IndianRed),
+                Fill = OxyColor.FromAColor(40, OxyColors.IndianRed),
+                StrokeThickness = 1
+            };
+
+            foreach (var point in perturbed.XCenter.Zip(perturbed.P75Error, (x, y) => new DataPoint(x, y)))
+            {
+                area.Points.Add(point);
+            }
+
+            for (int i = perturbed.XCenter.Count - 1; i >= 0; i--)
+            {
+                area.Points2.Add(new DataPoint(perturbed.XCenter[i], perturbed.P25Error[i]));
+            }
+
+            model.Series.Add(area);
+
+            var medianSeries = new LineSeries
+            {
+                Title = "Perturbed median",
+                StrokeThickness = 2,
+                MarkerType = MarkerType.Square,
+                MarkerSize = 4,
+                Color = OxyColors.IndianRed
+            };
+
+            foreach (var point in perturbed.XCenter.Zip(perturbed.MedianError, (x, y) => new DataPoint(x, y)))
+            {
+                medianSeries.Points.Add(point);
+            }
+
+            model.Series.Add(medianSeries);
+        }
+
+        using var stream = File.Open(outputPath, FileMode.Create);
+        new PngExporter { Width = 900, Height = 600 }.Export(model, stream);
     }
 
     private static double Euclidean(IReadOnlyList<double> predicted, IReadOnlyList<double> truth)
@@ -1430,6 +1727,17 @@ internal static class Program
         public required double Median { get; init; }
         public required double Rmse { get; init; }
         public required int Count { get; init; }
+    }
+
+    private sealed record BinnedErrorSummary
+    {
+        public required List<double> XCenter { get; init; }
+        public required List<double> MedianError { get; init; }
+        public required List<double> P25Error { get; init; }
+        public required List<double> P75Error { get; init; }
+        public required List<int> Counts { get; init; }
+        public required List<double> BinLower { get; init; }
+        public required List<double> BinUpper { get; init; }
     }
 
     private sealed record RocPoint(double FalsePositiveRate, double TruePositiveRate);
