@@ -177,7 +177,7 @@ public sealed class ModelTrainer
         return new RegressionModelGroup(_mlContext, models);
     }
 
-    public RegressionMetrics EvaluateRegressor(ITransformer model, IReadOnlyList<(float[] Features, float Label)> rows)
+    public Microsoft.ML.Data.RegressionMetrics EvaluateRegressor(ITransformer model, IReadOnlyList<(float[] Features, float Label)> rows)
     {
         var data = _mlContext.Data.LoadFromEnumerable(rows.Select(r => new RegressionExample { Features = r.Features, Label = r.Label }));
         var transformed = model.Transform(data);
