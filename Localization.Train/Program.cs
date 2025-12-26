@@ -37,7 +37,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         var trainer = new ModelTrainer();
@@ -282,6 +282,22 @@ internal static class Program
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"Artifacts saved to {outputDir}");
+
+        if (runPermutationControl || runLabelShuffleControl)
+        {
+            RunNegativeControls(
+                trainer,
+                pipeline,
+                classifierHoldoutModel,
+                featureBuilder,
+                singleRows,
+                dualRows,
+                split,
+                outputDir,
+                negativeControlSeed,
+                runPermutationControl,
+                runLabelShuffleControl);
+        }
     }
 
     private static double TrainWithHoldout(ModelTrainer trainer, List<float[]> features, List<double[]> targets, IReadOnlyList<string> targetNames)
@@ -707,6 +723,17 @@ internal static class Program
         return new ClassificationExample { Label = row.IsDual, Features = features.Select(f => (float)f).ToArray() };
     }
 
+    private static ClassificationExample BuildClassificationExample(FeatureBuilder featureBuilder, LocalizationRow row, IReadOnlyList<int>? permutation)
+    {
+        if (permutation is null)
+        {
+            return BuildClassificationExample(featureBuilder, row);
+        }
+
+        var features = featureBuilder.BuildFeaturesWithPermutation(row.Channels, permutation, row.DurationSeconds).FeatureVector;
+        return new ClassificationExample { Label = row.IsDual, Features = features.Select(f => (float)f).ToArray() };
+    }
+
     private static List<(ClassificationPrediction Prediction, bool Label)> BuildPredictions(ModelTrainer trainer, ITransformer model, IReadOnlyList<ClassificationExample> examples)
     {
         var predictionEngine = trainer.MlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(model);
@@ -770,6 +797,635 @@ internal static class Program
         Console.WriteLine($"  FN={matrix.Counts[1][0]}, TP={matrix.Counts[1][1]}");
     }
 
+    private static void RunNegativeControls(
+        ModelTrainer trainer,
+        LocalizationPipeline pipeline,
+        ITransformer classifier,
+        FeatureBuilder featureBuilder,
+        IReadOnlyList<LocalizationRow> singleRows,
+        IReadOnlyList<LocalizationRow> dualRows,
+        (IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> Train, IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> Calibration, IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> Test) split,
+        string outputDir,
+        int negativeControlSeed,
+        bool runPermutationControl,
+        bool runLabelShuffleControl)
+    {
+        var allRows = singleRows.Concat(dualRows).ToList();
+        var groupedSplit = Grouping.GroupSplit(allRows, 0.2, 42);
+
+        if (runPermutationControl)
+        {
+            var permutation = BuildDeterministicPermutation(negativeControlSeed);
+            Console.WriteLine($"[Negative control] Channel permutation (seed={negativeControlSeed}): {string.Join(",", permutation)}");
+
+            var randomHoldoutRows = split.Test.Select(t => t.Row).ToList();
+            var groupedHoldoutRows = groupedSplit.Holdout;
+
+            var baselineRandomClassifier = EvaluateClassifier(trainer, classifier, featureBuilder, randomHoldoutRows, null);
+            var permutedRandomClassifier = EvaluateClassifier(trainer, classifier, featureBuilder, randomHoldoutRows, permutation);
+
+            var baselineGroupedClassifier = EvaluateClassifier(trainer, classifier, featureBuilder, groupedHoldoutRows, null);
+            var permutedGroupedClassifier = EvaluateClassifier(trainer, classifier, featureBuilder, groupedHoldoutRows, permutation);
+
+            var baselineRandomLocalization = EvaluateLocalization(pipeline, randomHoldoutRows, null);
+            var permutedRandomLocalization = EvaluateLocalization(pipeline, randomHoldoutRows, permutation);
+
+            var baselineGroupedLocalization = EvaluateLocalization(pipeline, groupedHoldoutRows, null);
+            var permutedGroupedLocalization = EvaluateLocalization(pipeline, groupedHoldoutRows, permutation);
+
+            var channelPermutationSummary = new NegativeControlChannelPermutationSummary
+            {
+                Seed = negativeControlSeed,
+                Permutation = permutation,
+                RandomHoldout = BuildNegativeSplit(
+                    baselineRandomClassifier,
+                    permutedRandomClassifier,
+                    baselineRandomLocalization,
+                    permutedRandomLocalization),
+                GroupedHoldout = BuildNegativeSplit(
+                    baselineGroupedClassifier,
+                    permutedGroupedClassifier,
+                    baselineGroupedLocalization,
+                    permutedGroupedLocalization)
+            };
+
+            var jsonPath = Path.Combine(outputDir, "negative_control_channel_permutation.json");
+            File.WriteAllText(jsonPath, JsonSerializer.Serialize(channelPermutationSummary, new JsonSerializerOptions { WriteIndented = true }));
+
+            SaveRocPrComparison(
+                baselineRandomClassifier.Probabilities,
+                permutedRandomClassifier.Probabilities,
+                Path.Combine(outputDir, "negative_control_channel_permutation_roc_pr.png"),
+                "Baseline",
+                "Permuted");
+
+            SaveCdfComparison(
+                baselineRandomLocalization.SingleErrors,
+                permutedRandomLocalization.SingleErrors,
+                Path.Combine(outputDir, "negative_control_channel_permutation_single_cdf.png"),
+                "Single-source localization error CDF");
+
+            SaveCdfComparison(
+                baselineRandomLocalization.DualErrors,
+                permutedRandomLocalization.DualErrors,
+                Path.Combine(outputDir, "negative_control_channel_permutation_dual_cdf.png"),
+                "Dual-source localization error CDF");
+
+            SaveRoutingComparison(
+                baselineRandomLocalization.Routing,
+                permutedRandomLocalization.Routing,
+                Path.Combine(outputDir, "negative_control_channel_permutation_routing.png"));
+
+            Console.WriteLine($"[Negative control] Channel permutation artifacts written to {jsonPath}");
+        }
+
+        if (runLabelShuffleControl)
+        {
+            Console.WriteLine($"[Negative control] Label shuffle sanity check (seed={negativeControlSeed})");
+
+            var shuffledTrain = ShuffleLabels(split.Train.Select(t => t.Example).ToList(), negativeControlSeed);
+            var rowHoldout = split.Test.Select(t => t.Example).ToList();
+
+            var (shuffledRowModel, shuffledRowMetrics, _) = trainer.TrainClassifier(shuffledTrain, rowHoldout);
+            var rowPredictions = BuildPredictions(trainer, shuffledRowModel, rowHoldout);
+            var rowSplitMetrics = BuildSplitMetrics(shuffledRowMetrics, rowPredictions);
+
+            var groupedTrainExamples = groupedSplit.Train.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+            var groupedHoldoutExamples = groupedSplit.Holdout.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+            var shuffledGroupedTrain = ShuffleLabels(groupedTrainExamples, negativeControlSeed + 1);
+            var (shuffledGroupedModel, shuffledGroupedMetrics, _) = trainer.TrainClassifier(shuffledGroupedTrain, groupedHoldoutExamples);
+            var groupedPredictions = BuildPredictions(trainer, shuffledGroupedModel, groupedHoldoutExamples);
+            var groupedSplitMetrics = BuildSplitMetrics(shuffledGroupedMetrics, groupedPredictions);
+
+            double rowChance = ComputeMajorityAccuracy(rowHoldout.Select(r => r.Label));
+            double groupedChance = ComputeMajorityAccuracy(groupedHoldoutExamples.Select(r => r.Label));
+
+            var labelShuffleSummary = new NegativeControlLabelShuffleSummary
+            {
+                Seed = negativeControlSeed,
+                RandomHoldout = new NegativeControlLabelShuffleSplit
+                {
+                    MajorityBaselineAccuracy = rowChance,
+                    Metrics = BuildClassificationMetrics(shuffledRowMetrics, rowSplitMetrics)
+                },
+                GroupedHoldout = new NegativeControlLabelShuffleSplit
+                {
+                    MajorityBaselineAccuracy = groupedChance,
+                    Metrics = BuildClassificationMetrics(shuffledGroupedMetrics, groupedSplitMetrics)
+                }
+            };
+
+            var jsonPath = Path.Combine(outputDir, "negative_control_label_shuffle.json");
+            File.WriteAllText(jsonPath, JsonSerializer.Serialize(labelShuffleSummary, new JsonSerializerOptions { WriteIndented = true }));
+
+            SaveRocPrComparison(
+                rowPredictions.Select(p => (p.Label, (double)p.Prediction.Probability)).ToList(),
+                groupedPredictions.Select(p => (p.Label, (double)p.Prediction.Probability)).ToList(),
+                Path.Combine(outputDir, "negative_control_label_shuffle_roc_pr.png"),
+                "Random holdout",
+                "Grouped holdout");
+
+            Console.WriteLine($"[Negative control] Label shuffle artifacts written to {jsonPath}");
+        }
+
+        if (runPermutationControl || runLabelShuffleControl)
+        {
+            Console.WriteLine("Negative-control expectation: channel permutation should collapse spatial performance; label shuffle should drive classifier toward chance-level accuracy.");
+        }
+    }
+
+    private static ClassificationMetricsSummary BuildClassificationMetrics(BinaryClassificationMetrics metrics, SplitMetrics split)
+    {
+        return new ClassificationMetricsSummary
+        {
+            Accuracy = metrics.Accuracy,
+            Precision = metrics.PositivePrecision,
+            Recall = metrics.PositiveRecall,
+            F1 = metrics.F1Score,
+            RocAuc = metrics.AreaUnderRocCurve,
+            PrAuc = metrics.AreaUnderPrecisionRecallCurve,
+            Confusion = new ConfusionCounts
+            {
+                TruePositives = split.TruePositives,
+                FalsePositives = split.FalsePositives,
+                TrueNegatives = split.TrueNegatives,
+                FalseNegatives = split.FalseNegatives
+            }
+        };
+    }
+
+    private static NegativeControlSplitResult BuildNegativeSplit(
+        (ClassificationMetricsSummary Metrics, IReadOnlyList<(bool Label, double Probability)> Probabilities, SplitMetrics RawSplit) baseline,
+        (ClassificationMetricsSummary Metrics, IReadOnlyList<(bool Label, double Probability)> Probabilities, SplitMetrics RawSplit) perturbed,
+        LocalizationEvaluationResult baselineLoc,
+        LocalizationEvaluationResult perturbedLoc)
+    {
+        return new NegativeControlSplitResult
+        {
+            BaselineClassifier = baseline.Metrics,
+            PerturbedClassifier = perturbed.Metrics,
+            BaselineSingle = SummarizeErrors(baselineLoc.SingleErrors),
+            PerturbedSingle = SummarizeErrors(perturbedLoc.SingleErrors),
+            BaselineDual = SummarizeErrors(baselineLoc.DualErrors),
+            PerturbedDual = SummarizeErrors(perturbedLoc.DualErrors),
+            BaselineRouting = baselineLoc.Routing,
+            PerturbedRouting = perturbedLoc.Routing
+        };
+    }
+
+    private static (ClassificationMetricsSummary Metrics, IReadOnlyList<(bool Label, double Probability)> Probabilities, SplitMetrics RawSplit) EvaluateClassifier(
+        ModelTrainer trainer,
+        ITransformer model,
+        FeatureBuilder featureBuilder,
+        IReadOnlyList<LocalizationRow> rows,
+        IReadOnlyList<int>? permutation)
+    {
+        var examples = rows.Select(r => BuildClassificationExample(featureBuilder, r, permutation)).ToList();
+        var dataView = trainer.MlContext.Data.LoadFromEnumerable(examples);
+        var metrics = trainer.MlContext.BinaryClassification.Evaluate(model.Transform(dataView), labelColumnName: nameof(ClassificationExample.Label));
+        var predictions = BuildPredictions(trainer, model, examples);
+        var splitMetrics = BuildSplitMetrics(metrics, predictions);
+        var probs = predictions.Select(p => (p.Label, (double)p.Prediction.Probability)).ToList();
+        return (BuildClassificationMetrics(metrics, splitMetrics), probs, splitMetrics);
+    }
+
+    private static LocalizationEvaluationResult EvaluateLocalization(LocalizationPipeline pipeline, IReadOnlyList<LocalizationRow> rows, IReadOnlyList<int>? permutation)
+    {
+        var singleErrors = new List<double>();
+        var dualErrors = new List<double>();
+        int singleRoute = 0, dualRoute = 0, centroidRoute = 0, unknownRoute = 0;
+
+        foreach (var row in rows)
+        {
+            var prediction = pipeline.Predict(row, permutation);
+
+            if (prediction.Label.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                unknownRoute++;
+            }
+            else if (prediction.Label.Contains("centroid", StringComparison.OrdinalIgnoreCase))
+            {
+                centroidRoute++;
+            }
+            else if (prediction.Label.StartsWith("Dual", StringComparison.OrdinalIgnoreCase))
+            {
+                dualRoute++;
+            }
+            else
+            {
+                singleRoute++;
+            }
+
+            if (!row.IsDual && row.SingleCoordinates is { Length: 3 } singleTruth)
+            {
+                var coords = prediction.Coordinates.Take(3).ToArray();
+                singleErrors.Add(Euclidean(coords, singleTruth));
+            }
+            else if (row.IsDual && row.DualCoordinates is { Length: 6 } dualTruth)
+            {
+                var errors = AssignmentAwareErrors(prediction.Coordinates, dualTruth);
+                dualErrors.Add(errors.First);
+                dualErrors.Add(errors.Second);
+            }
+        }
+
+        int total = rows.Count;
+        var routing = new RoutingBreakdown
+        {
+            SingleFraction = total == 0 ? double.NaN : (double)singleRoute / total,
+            DualFraction = total == 0 ? double.NaN : (double)dualRoute / total,
+            CentroidFraction = total == 0 ? double.NaN : (double)centroidRoute / total,
+            UnknownFraction = total == 0 ? double.NaN : (double)unknownRoute / total,
+            Total = total
+        };
+
+        return new LocalizationEvaluationResult(singleErrors, dualErrors, routing);
+    }
+
+    private static LocalizationErrorSummary SummarizeErrors(IReadOnlyList<double> errors)
+    {
+        if (errors.Count == 0)
+        {
+            return new LocalizationErrorSummary { Count = 0, Mean = double.NaN, Median = double.NaN, Rmse = double.NaN };
+        }
+
+        double mean = errors.Average();
+        double rmse = Math.Sqrt(errors.Average(e => e * e));
+        var sorted = errors.OrderBy(e => e).ToArray();
+        double median = Percentile(sorted, 0.5);
+        return new LocalizationErrorSummary { Count = errors.Count, Mean = mean, Median = median, Rmse = rmse };
+    }
+
+    private static double Percentile(IReadOnlyList<double> sorted, double percentile)
+    {
+        if (sorted.Count == 0)
+        {
+            return double.NaN;
+        }
+
+        double position = (sorted.Count - 1) * percentile;
+        int lowerIndex = (int)Math.Floor(position);
+        int upperIndex = (int)Math.Ceiling(position);
+
+        if (upperIndex >= sorted.Count)
+        {
+            return sorted[^1];
+        }
+
+        double weight = position - lowerIndex;
+        return sorted[lowerIndex] * (1 - weight) + sorted[upperIndex] * weight;
+    }
+
+    private static double Euclidean(IReadOnlyList<double> predicted, IReadOnlyList<double> truth)
+    {
+        int dimension = Math.Min(predicted.Count, truth.Count);
+        double sum = 0;
+        for (int i = 0; i < dimension; i++)
+        {
+            sum += Math.Pow(predicted[i] - truth[i], 2);
+        }
+
+        return Math.Sqrt(sum);
+    }
+
+    private static (double First, double Second) AssignmentAwareErrors(IReadOnlyList<double> prediction, IReadOnlyList<double> truth)
+    {
+        if (prediction.Count < 6 || truth.Count < 6)
+        {
+            return (double.NaN, double.NaN);
+        }
+
+        var predA = prediction.Take(3).ToArray();
+        var predB = prediction.Skip(3).Take(3).ToArray();
+        var truthA = truth.Take(3).ToArray();
+        var truthB = truth.Skip(3).Take(3).ToArray();
+
+        double option1 = Euclidean(predA, truthA) + Euclidean(predB, truthB);
+        double option2 = Euclidean(predA, truthB) + Euclidean(predB, truthA);
+
+        if (option1 <= option2)
+        {
+            return (Euclidean(predA, truthA), Euclidean(predB, truthB));
+        }
+
+        return (Euclidean(predA, truthB), Euclidean(predB, truthA));
+    }
+
+    private static int[] BuildDeterministicPermutation(int seed)
+    {
+        var rng = new Random(seed);
+        return Enumerable.Range(0, FeatureBuilder.ChannelCount).OrderBy(_ => rng.Next()).ToArray();
+    }
+
+    private static List<ClassificationExample> ShuffleLabels(IReadOnlyList<ClassificationExample> examples, int seed)
+    {
+        var labels = examples.Select(e => e.Label).ToList();
+        var rng = new Random(seed);
+        labels = labels.OrderBy(_ => rng.Next()).ToList();
+
+        var shuffled = new List<ClassificationExample>(examples.Count);
+        for (int i = 0; i < examples.Count; i++)
+        {
+            shuffled.Add(new ClassificationExample
+            {
+                Features = examples[i].Features,
+                Label = labels[i]
+            });
+        }
+
+        return shuffled;
+    }
+
+    private static double ComputeMajorityAccuracy(IEnumerable<bool> labels)
+    {
+        int positives = labels.Count(l => l);
+        int negatives = labels.Count() - positives;
+        if (positives + negatives == 0)
+        {
+            return double.NaN;
+        }
+
+        return Math.Max(positives, negatives) / (double)(positives + negatives);
+    }
+
+    private static void SaveRocPrComparison(
+        IReadOnlyList<(bool Label, double Probability)> baseline,
+        IReadOnlyList<(bool Label, double Probability)> perturbed,
+        string outputPath,
+        string baselineLabel,
+        string perturbedLabel)
+    {
+        var thresholds = Enumerable.Range(0, 501).Select(i => i / 500.0).ToArray();
+
+        var baselineRoc = thresholds.Select(t => ComputeRocPoint(baseline.Select(b => b.Label).ToList(), baseline.Select(b => b.Probability).ToList(), t)).ToList();
+        var perturbedRoc = thresholds.Select(t => ComputeRocPoint(perturbed.Select(b => b.Label).ToList(), perturbed.Select(b => b.Probability).ToList(), t)).ToList();
+
+        var baselinePr = thresholds.Select(t => ComputePrPoint(baseline.Select(b => b.Label).ToList(), baseline.Select(b => b.Probability).ToList(), t)).ToList();
+        var perturbedPr = thresholds.Select(t => ComputePrPoint(perturbed.Select(b => b.Label).ToList(), perturbed.Select(b => b.Probability).ToList(), t)).ToList();
+
+        var rocModel = CreateNormalizedModel("Classifier ROC (negative control)", "False Positive Rate", "True Positive Rate");
+        var prModel = CreateNormalizedModel("Classifier PR (negative control)", "Recall", "Precision");
+
+        AddCurve(rocModel, baselineRoc.Select(p => new DataPoint(p.FalsePositiveRate, p.TruePositiveRate)), baselineLabel, OxyColors.SteelBlue);
+        AddCurve(rocModel, perturbedRoc.Select(p => new DataPoint(p.FalsePositiveRate, p.TruePositiveRate)), perturbedLabel, OxyColors.IndianRed);
+
+        AddCurve(prModel, baselinePr.Select(p => new DataPoint(p.Recall, p.Precision)), baselineLabel, OxyColors.SteelBlue);
+        AddCurve(prModel, perturbedPr.Select(p => new DataPoint(p.Recall, p.Precision)), perturbedLabel, OxyColors.IndianRed);
+
+        SaveSideBySide(rocModel, prModel, outputPath, 900, 600);
+    }
+
+    private static RocPoint ComputeRocPoint(IReadOnlyList<bool> labels, IReadOnlyList<double> probabilities, double threshold)
+    {
+        int tp = 0, fp = 0, tn = 0, fn = 0;
+        for (int i = 0; i < labels.Count; i++)
+        {
+            bool predicted = probabilities[i] >= threshold;
+            bool actual = labels[i];
+            if (predicted && actual)
+            {
+                tp++;
+            }
+            else if (predicted && !actual)
+            {
+                fp++;
+            }
+            else if (!predicted && actual)
+            {
+                fn++;
+            }
+            else
+            {
+                tn++;
+            }
+        }
+
+        double tpr = tp + fn == 0 ? 0 : (double)tp / (tp + fn);
+        double fpr = fp + tn == 0 ? 0 : (double)fp / (fp + tn);
+        return new RocPoint(fpr, tpr);
+    }
+
+    private static PrPoint ComputePrPoint(IReadOnlyList<bool> labels, IReadOnlyList<double> probabilities, double threshold)
+    {
+        int tp = 0, fp = 0, fn = 0;
+        for (int i = 0; i < labels.Count; i++)
+        {
+            bool predicted = probabilities[i] >= threshold;
+            bool actual = labels[i];
+            if (predicted && actual)
+            {
+                tp++;
+            }
+            else if (predicted && !actual)
+            {
+                fp++;
+            }
+            else if (!predicted && actual)
+            {
+                fn++;
+            }
+        }
+
+        double precision = tp + fp == 0 ? 1 : (double)tp / (tp + fp);
+        double recall = tp + fn == 0 ? 0 : (double)tp / (tp + fn);
+        return new PrPoint(recall, precision);
+    }
+
+    private static PlotModel CreateNormalizedModel(string title, string xLabel, string yLabel)
+    {
+        var model = new PlotModel { Title = title };
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Minimum = 0, Maximum = 1, Title = xLabel });
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Minimum = 0, Maximum = 1, Title = yLabel });
+        return model;
+    }
+
+    private static void AddCurve(PlotModel model, IEnumerable<DataPoint> points, string title, OxyColor color)
+    {
+        var series = new LineSeries { Title = title, StrokeThickness = 2, Color = color };
+        foreach (var point in points)
+        {
+            series.Points.Add(point);
+        }
+
+        model.Series.Add(series);
+    }
+
+    private static void SaveCdfComparison(
+        IReadOnlyList<double> baselineErrors,
+        IReadOnlyList<double> perturbedErrors,
+        string outputPath,
+        string title)
+    {
+        var model = CreateCdfModel(title, "Error (cm)", "CDF");
+
+        void AddCdf(IReadOnlyList<double> errors, string label, OxyColor color)
+        {
+            if (errors.Count == 0)
+            {
+                return;
+            }
+
+            var sorted = errors.OrderBy(e => e).ToArray();
+            var (xs, ys) = BuildCdf(sorted);
+            var series = new LineSeries { Title = label, StrokeThickness = 2, Color = color };
+            for (int i = 0; i < xs.Length; i++)
+            {
+                series.Points.Add(new DataPoint(xs[i], ys[i]));
+            }
+
+            model.Series.Add(series);
+        }
+
+        AddCdf(baselineErrors, "Baseline", OxyColors.SteelBlue);
+        AddCdf(perturbedErrors, "Perturbed", OxyColors.IndianRed);
+
+        using var stream = File.Open(outputPath, FileMode.Create);
+        new PngExporter { Width = 900, Height = 600 }.Export(model, stream);
+    }
+
+    private static PlotModel CreateCdfModel(string title, string xLabel, string yLabel)
+    {
+        var model = new PlotModel
+        {
+            Title = title
+        };
+
+        model.Axes.Add(new LinearAxis
+        {
+            Position = AxisPosition.Bottom,
+            Title = xLabel,
+            Minimum = 0,
+            MajorGridlineStyle = LineStyle.Solid,
+            MinorGridlineStyle = LineStyle.Dot
+        });
+
+        model.Axes.Add(new LinearAxis
+        {
+            Position = AxisPosition.Left,
+            Title = yLabel,
+            Minimum = 0,
+            Maximum = 1,
+            MajorGridlineStyle = LineStyle.Solid,
+            MinorGridlineStyle = LineStyle.Dot
+        });
+
+        return model;
+    }
+
+    private static (double[] Xs, double[] Ys) BuildCdf(IReadOnlyList<double> sorted)
+    {
+        var xs = new double[sorted.Count];
+        var ys = new double[sorted.Count];
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            xs[i] = sorted[i];
+            ys[i] = (i + 1) / (double)sorted.Count;
+        }
+
+        return (xs, ys);
+    }
+
+    private static void SaveRoutingComparison(RoutingBreakdown baseline, RoutingBreakdown perturbed, string outputPath)
+    {
+        var model = new PlotModel { Title = "Routing breakdown (baseline vs perturbed)" };
+        var categoryAxis = new CategoryAxis { Position = AxisPosition.Bottom };
+        categoryAxis.Labels.AddRange(new[] { "Single", "Dual", "Centroid", "Unknown" });
+        model.Axes.Add(categoryAxis);
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Minimum = 0, Maximum = 1, Title = "Fraction" });
+
+        var baselineSeries = new ColumnSeries { Title = "Baseline", FillColor = OxyColors.SteelBlue };
+        baselineSeries.Items.Add(new ColumnItem(baseline.SingleFraction));
+        baselineSeries.Items.Add(new ColumnItem(baseline.DualFraction));
+        baselineSeries.Items.Add(new ColumnItem(baseline.CentroidFraction));
+        baselineSeries.Items.Add(new ColumnItem(baseline.UnknownFraction));
+
+        var perturbedSeries = new ColumnSeries { Title = "Perturbed", FillColor = OxyColors.IndianRed };
+        perturbedSeries.Items.Add(new ColumnItem(perturbed.SingleFraction));
+        perturbedSeries.Items.Add(new ColumnItem(perturbed.DualFraction));
+        perturbedSeries.Items.Add(new ColumnItem(perturbed.CentroidFraction));
+        perturbedSeries.Items.Add(new ColumnItem(perturbed.UnknownFraction));
+
+        model.Series.Add(baselineSeries);
+        model.Series.Add(perturbedSeries);
+
+        using var stream = File.Open(outputPath, FileMode.Create);
+        new PngExporter { Width = 900, Height = 600 }.Export(model, stream);
+    }
+
+    private sealed record LocalizationEvaluationResult(List<double> SingleErrors, List<double> DualErrors, RoutingBreakdown Routing);
+
+    private sealed record RoutingBreakdown
+    {
+        public double SingleFraction { get; init; }
+        public double DualFraction { get; init; }
+        public double CentroidFraction { get; init; }
+        public double UnknownFraction { get; init; }
+        public int Total { get; init; }
+    }
+
+    private sealed record LocalizationErrorSummary
+    {
+        public required double Mean { get; init; }
+        public required double Median { get; init; }
+        public required double Rmse { get; init; }
+        public required int Count { get; init; }
+    }
+
+    private sealed record RocPoint(double FalsePositiveRate, double TruePositiveRate);
+    private sealed record PrPoint(double Recall, double Precision);
+
+    private sealed record ConfusionCounts
+    {
+        public int TruePositives { get; init; }
+        public int FalsePositives { get; init; }
+        public int TrueNegatives { get; init; }
+        public int FalseNegatives { get; init; }
+    }
+
+    private sealed record ClassificationMetricsSummary
+    {
+        public double Accuracy { get; init; }
+        public double Precision { get; init; }
+        public double Recall { get; init; }
+        public double F1 { get; init; }
+        public double RocAuc { get; init; }
+        public double PrAuc { get; init; }
+        public ConfusionCounts Confusion { get; init; } = new();
+    }
+
+    private sealed record NegativeControlSplitResult
+    {
+        public required ClassificationMetricsSummary BaselineClassifier { get; init; }
+        public required ClassificationMetricsSummary PerturbedClassifier { get; init; }
+        public required LocalizationErrorSummary BaselineSingle { get; init; }
+        public required LocalizationErrorSummary PerturbedSingle { get; init; }
+        public required LocalizationErrorSummary BaselineDual { get; init; }
+        public required LocalizationErrorSummary PerturbedDual { get; init; }
+        public required RoutingBreakdown BaselineRouting { get; init; }
+        public required RoutingBreakdown PerturbedRouting { get; init; }
+    }
+
+    private sealed record NegativeControlChannelPermutationSummary
+    {
+        public required int Seed { get; init; }
+        public required IReadOnlyList<int> Permutation { get; init; }
+        public required NegativeControlSplitResult RandomHoldout { get; init; }
+        public required NegativeControlSplitResult GroupedHoldout { get; init; }
+    }
+
+    private sealed record NegativeControlLabelShuffleSplit
+    {
+        public required double MajorityBaselineAccuracy { get; init; }
+        public required ClassificationMetricsSummary Metrics { get; init; }
+    }
+
+    private sealed record NegativeControlLabelShuffleSummary
+    {
+        public required int Seed { get; init; }
+        public required NegativeControlLabelShuffleSplit RandomHoldout { get; init; }
+        public required NegativeControlLabelShuffleSplit GroupedHoldout { get; init; }
+    }
+
     private static double TrainWithGroupedHoldout(ModelTrainer trainer, IReadOnlyList<LocalizationRow> rows, FeatureBuilder featureBuilder, IReadOnlyList<string> targetNames, Func<LocalizationRow, double[]> targetSelector)
     {
         if (rows.Count == 0)
@@ -805,7 +1461,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -814,6 +1470,10 @@ internal static class Program
         bool validateOod = true;
         double oodFaultFraction = 0.5;
         int oodSeed = 123;
+        bool runNegativeControls = false;
+        int negativeControlSeed = 2024;
+        bool runPermutationControl = false;
+        bool runLabelShuffleControl = false;
 
         foreach (var arg in args)
         {
@@ -845,9 +1505,28 @@ internal static class Program
             {
                 oodSeed = int.Parse(arg.Substring("--ood-seed=".Length), CultureInfo.InvariantCulture);
             }
+            else if (arg.Equals("--negative-controls", StringComparison.OrdinalIgnoreCase))
+            {
+                runNegativeControls = true;
+            }
+            else if (arg.StartsWith("--negctrl-seed="))
+            {
+                negativeControlSeed = int.Parse(arg.Substring("--negctrl-seed=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.Equals("--negctrl-permute-channels", StringComparison.OrdinalIgnoreCase))
+            {
+                runPermutationControl = true;
+            }
+            else if (arg.Equals("--negctrl-shuffle-labels", StringComparison.OrdinalIgnoreCase))
+            {
+                runLabelShuffleControl = true;
+            }
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed);
+        runPermutationControl |= runNegativeControls;
+        runLabelShuffleControl |= runNegativeControls;
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)

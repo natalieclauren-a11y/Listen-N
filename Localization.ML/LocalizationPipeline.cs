@@ -29,9 +29,11 @@ public sealed class LocalizationPipeline
         _config = config;
     }
 
-    public PredictionResult Predict(LocalizationRow row)
+    public PredictionResult Predict(LocalizationRow row, IReadOnlyList<int>? channelPermutation = null)
     {
-        var features = _featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds);
+        var features = channelPermutation == null
+            ? _featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds)
+            : _featureBuilder.BuildFeaturesWithPermutation(row.Channels, channelPermutation, row.DurationSeconds);
         _featureBuilder.EnsureFeatureParity(features.FeatureVector);
         var subset = ExtractOodFeatures(features.FeatureVector);
         double distance = _mahalanobis.Score(subset);
