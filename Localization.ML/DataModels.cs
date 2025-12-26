@@ -65,6 +65,8 @@ public sealed class PredictionResult
     public IReadOnlyList<double>? RawClassifierProbabilities { get; init; }
 }
 
+public sealed record FeatureImportanceItem(string Feature, double Gain);
+
 public sealed class TrainingSummary
 {
     public required double HoldoutAccuracy { get; init; }
@@ -76,7 +78,7 @@ public sealed class TrainingSummary
     public required double RandomLabelAccuracy { get; init; }
     public required double SingleRegressorR2 { get; init; }
     public required double DualRegressorR2 { get; init; }
-    public required IReadOnlyList<(string Feature, double Gain)> FeatureImportance { get; init; }
+    public required IReadOnlyList<FeatureImportanceItem> FeatureImportance { get; init; }
     public CalibrationReport? Calibration { get; init; }
 }
 

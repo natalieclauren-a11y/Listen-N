@@ -60,47 +60,60 @@ internal static class Program
         }
 
         const int reliabilityBins = 10;
-        const CalibrationKind calibratorChoice = CalibrationKind.Isotonic;
 
-        var split = StratifiedThreeWaySplit(classificationExamples, calibrationFraction: 0.2, testFraction: 0.2, seed: 42);
+        var split = StratifiedThreeWaySplit(classificationExamples, calibrationFraction: 0.0, testFraction: 0.2, seed: 42);
         var (classifierHoldoutModel, metrics, importances) = trainer.TrainClassifier(split.Train, split.Test);
         var cv = trainer.CrossValidateClassifier(classificationExamples);
         var randomCheck = trainer.RandomLabelSanityCheck(classificationExamples);
 
-        var calibrationEngine = trainer.MlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(classifierHoldoutModel);
-        var calibrationSamples = split.Calibration.Select(example =>
-        {
-            var prediction = calibrationEngine.Predict(example);
-            return (Probability: (double)prediction.Probability, Label: example.Label);
-        }).ToList();
+        var predictionEngine = trainer.MlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(classifierHoldoutModel);
+        var testPredictions = split.Test
+            .Select(example => (Prediction: predictionEngine.Predict(example), example.Label))
+            .ToList();
 
-        CalibrationModel calibrationModel = calibratorChoice switch
+        int tp = 0, tn = 0, fp = 0, fn = 0;
+        foreach (var sample in testPredictions)
         {
-            CalibrationKind.Platt => CalibrationModel.FitPlatt(calibrationSamples, reliabilityBins),
-            CalibrationKind.Isotonic => CalibrationModel.FitIsotonic(calibrationSamples, reliabilityBins),
-            _ => CalibrationModel.Identity(reliabilityBins)
-        };
-
-        var testPredictions = new List<(double Raw, double Calibrated, bool Label)>();
-        foreach (var example in split.Test)
-        {
-            var prediction = calibrationEngine.Predict(example);
-            double raw = prediction.Probability;
-            double calibrated = calibrationModel.Apply(raw);
-            testPredictions.Add((raw, calibrated, example.Label));
+            if (sample.Prediction.PredictedLabel && sample.Label)
+            {
+                tp++;
+            }
+            else if (sample.Prediction.PredictedLabel && !sample.Label)
+            {
+                fp++;
+            }
+            else if (!sample.Prediction.PredictedLabel && !sample.Label)
+            {
+                tn++;
+            }
+            else
+            {
+                fn++;
+            }
         }
 
-        var brierRaw = CalibrationModel.ComputeBrierScore(testPredictions.Select(p => (p.Raw, p.Label)));
-        var brierCalibrated = CalibrationModel.ComputeBrierScore(testPredictions.Select(p => (p.Calibrated, p.Label)));
-        var ece = CalibrationModel.ComputeExpectedCalibrationError(testPredictions.Select(p => (p.Calibrated, p.Label)), reliabilityBins, p => p);
-        var reliability = CalibrationModel.BuildReliabilityBins(testPredictions.Select(p => (p.Calibrated, p.Label)), reliabilityBins);
+        double manualPrecision = tp + fp == 0 ? double.NaN : (double)tp / (tp + fp);
+        double manualRecall = tp + fn == 0 ? double.NaN : (double)tp / (tp + fn);
+        double manualF1 = double.IsNaN(manualPrecision) || double.IsNaN(manualRecall) || (manualPrecision + manualRecall) == 0
+            ? double.NaN
+            : 2 * manualPrecision * manualRecall / (manualPrecision + manualRecall);
 
-        Console.WriteLine("Classifier holdout metrics:");
+        var probabilitySamples = testPredictions
+            .Select(p => (Probability: (double)p.Prediction.Probability, p.Label))
+            .ToList();
+        var brier = CalibrationModel.ComputeBrierScore(probabilitySamples);
+        var ece = CalibrationModel.ComputeExpectedCalibrationError(probabilitySamples, reliabilityBins, p => p);
+        var reliability = CalibrationModel.BuildReliabilityBins(probabilitySamples, reliabilityBins, p => p);
+
+        Console.WriteLine("Classifier holdout metrics (ML.NET):");
         Console.WriteLine($"  Accuracy: {metrics.Accuracy:F3}");
         Console.WriteLine($"  Precision: {metrics.PositivePrecision:F3}");
         Console.WriteLine($"  Recall: {metrics.PositiveRecall:F3}");
         Console.WriteLine($"  F1: {metrics.F1Score:F3}");
-        Console.WriteLine("Confusion matrix (rows=actual, cols=predicted):");
+        Console.WriteLine("Manual confusion matrix (PredictedLabel vs. ground truth):");
+        Console.WriteLine($"  TP={tp}, FP={fp}, TN={tn}, FN={fn}");
+        Console.WriteLine($"  Manual Precision={manualPrecision:F3}, Recall={manualRecall:F3}, F1={manualF1:F3}");
+        Console.WriteLine("ML.NET confusion matrix (rows=actual [False, True], cols=predicted [False, True]):");
         var matrix = metrics.ConfusionMatrix;
         Console.WriteLine($"  TN={matrix.Counts[0][0]}, FP={matrix.Counts[0][1]}");
         Console.WriteLine($"  FN={matrix.Counts[1][0]}, TP={matrix.Counts[1][1]}");
@@ -113,19 +126,18 @@ internal static class Program
             Console.WriteLine($"  {item.Feature}: {item.Gain:F5}");
         }
 
-        Console.WriteLine("Calibration holdout (raw -> calibrated | label):");
+        Console.WriteLine("Reliability holdout (ML.NET Platt-calibrated probability | label):");
         foreach (var sample in testPredictions.Take(5))
         {
-            Console.WriteLine($"  {sample.Raw:F4} -> {sample.Calibrated:F4} | label={(sample.Label ? 1 : 0)}");
+            Console.WriteLine($"  {sample.Prediction.Probability:F4} | label={(sample.Label ? 1 : 0)}");
         }
 
 
         var reliabilityPlot = BuildReliabilityDiagram(
             reliability,
-            brierRaw,
-            brierCalibrated,
+            brier,
             reliabilityBins,
-            calibratorChoice.ToString());
+            "Platt-calibrated (ML.NET) Probability");
         var reliabilityPath = Path.Combine(outputDir, "reliability_diagram.png");
         using (var stream = File.Open(reliabilityPath, FileMode.Create))
         {
@@ -172,9 +184,9 @@ internal static class Program
 
         var calibrationReport = new CalibrationReport
         {
-            CalibratorType = calibratorChoice.ToString(),
-            BrierScoreRaw = brierRaw,
-            BrierScoreCalibrated = brierCalibrated,
+            CalibratorType = "MLNetPlatt",
+            BrierScoreRaw = brier,
+            BrierScoreCalibrated = brier,
             ExpectedCalibrationError = ece,
             ReliabilityBinCount = reliabilityBins
         };
@@ -206,7 +218,7 @@ internal static class Program
             Calibration = calibrationReport
         };
 
-        var pipeline = new LocalizationPipeline(trainer.MlContext, featureBuilder, classifierHoldoutModel, singleRegressor, dualRegressor, mahalanobis, config, calibrationModel);
+        var pipeline = new LocalizationPipeline(trainer.MlContext, featureBuilder, classifierHoldoutModel, singleRegressor, dualRegressor, mahalanobis, config);
         pipeline.Save(outputDir);
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
@@ -323,12 +335,12 @@ internal static class Program
         return (train, calibration, test);
     }
 
-    private static PlotModel BuildReliabilityDiagram(IReadOnlyList<ReliabilityBin> bins, double brierRaw, double brierCalibrated, int binCount, string calibrator)
+    private static PlotModel BuildReliabilityDiagram(IReadOnlyList<ReliabilityBin> bins, double brierScore, int binCount, string probabilityLabel)
     {
         var model = new PlotModel
         {
-            Title = $"Reliability Diagram (raw={brierRaw:F3}, calibrated={brierCalibrated:F3})",
-            Subtitle = $"Calibrator: {calibrator}, Bins={binCount}"
+            Title = $"Reliability Diagram (Brier={brierScore:F3})",
+            Subtitle = $"Probability: {probabilityLabel}, Bins={binCount}"
         };
 
         model.Axes.Add(new LinearAxis

@@ -24,7 +24,7 @@ public sealed class ModelTrainer
     public FeatureBuilder FeatureBuilder => _featureBuilder;
     public MLContext MlContext => _mlContext;
 
-    public (ITransformer Model, BinaryClassificationMetrics Metrics, IReadOnlyList<(string Feature, double Gain)> Importances) TrainClassifier(IReadOnlyList<ClassificationExample> trainData, IReadOnlyList<ClassificationExample>? evaluationData = null, int permutationCount = 5)
+    public (ITransformer Model, BinaryClassificationMetrics Metrics, IReadOnlyList<FeatureImportanceItem> Importances) TrainClassifier(IReadOnlyList<ClassificationExample> trainData, IReadOnlyList<ClassificationExample>? evaluationData = null, int permutationCount = 5)
     {
         IReadOnlyList<ClassificationExample> train = trainData;
         IReadOnlyList<ClassificationExample> test = evaluationData ?? Array.Empty<ClassificationExample>();
@@ -53,7 +53,7 @@ public sealed class ModelTrainer
         var metrics = _mlContext.BinaryClassification.Evaluate(predictions, labelColumnName: nameof(ClassificationExample.Label));
         var baselineAuc = metrics.AreaUnderRocCurve;
 
-        var importances = new List<(string Feature, double Gain)>();
+        var importances = new List<FeatureImportanceItem>();
         if (testList.Count > 0)
         {
             var random = new Random(42);
@@ -89,7 +89,7 @@ public sealed class ModelTrainer
                 }
 
                 var gain = aucDropSum / effectivePermutationCount;
-                importances.Add((_featureBuilder.FeatureNames[featureIndex], gain));
+                importances.Add(new FeatureImportanceItem(_featureBuilder.FeatureNames[featureIndex], gain));
             }
         }
 
