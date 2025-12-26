@@ -17,6 +17,12 @@ namespace Localization.Train;
 
 internal static class Program
 {
+    private static readonly JsonSerializerOptions JsonWithNamedFloats = new()
+    {
+        WriteIndented = true,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
+
     private static readonly string[] SingleGroups =
     {
         "Cf_30_Second_LMX",
@@ -850,7 +856,7 @@ internal static class Program
             };
 
             var jsonPath = Path.Combine(outputDir, "negative_control_channel_permutation.json");
-            File.WriteAllText(jsonPath, JsonSerializer.Serialize(channelPermutationSummary, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(jsonPath, JsonSerializer.Serialize(channelPermutationSummary, JsonWithNamedFloats));
 
             SaveRocPrComparison(
                 baselineRandomClassifier.Probabilities,
@@ -916,7 +922,7 @@ internal static class Program
             };
 
             var jsonPath = Path.Combine(outputDir, "negative_control_label_shuffle.json");
-            File.WriteAllText(jsonPath, JsonSerializer.Serialize(labelShuffleSummary, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(jsonPath, JsonSerializer.Serialize(labelShuffleSummary, JsonWithNamedFloats));
 
             SaveRocPrComparison(
                 rowPredictions.Select(p => (p.Label, (double)p.Prediction.Probability)).ToList(),
