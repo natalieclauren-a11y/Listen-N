@@ -1355,22 +1355,50 @@ internal static class Program
     private static void SaveRoutingComparison(RoutingBreakdown baseline, RoutingBreakdown perturbed, string outputPath)
     {
         var model = new PlotModel { Title = "Routing breakdown (baseline vs perturbed)" };
-        var categoryAxis = new CategoryAxis { Position = AxisPosition.Bottom };
+
+        // Use category names on the bottom axis, but plot using numeric X indices (0..3).
+        var categoryAxis = new CategoryAxis
+        {
+            Position = AxisPosition.Bottom
+        };
         categoryAxis.Labels.AddRange(new[] { "Single", "Dual", "Centroid", "Unknown" });
         model.Axes.Add(categoryAxis);
-        model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Minimum = 0, Maximum = 1, Title = "Fraction" });
 
-        var baselineSeries = new ColumnSeries { Title = "Baseline", FillColor = OxyColors.SteelBlue };
-        baselineSeries.Items.Add(new ColumnItem(baseline.SingleFraction));
-        baselineSeries.Items.Add(new ColumnItem(baseline.DualFraction));
-        baselineSeries.Items.Add(new ColumnItem(baseline.CentroidFraction));
-        baselineSeries.Items.Add(new ColumnItem(baseline.UnknownFraction));
+        model.Axes.Add(new LinearAxis
+        {
+            Position = AxisPosition.Left,
+            Minimum = 0,
+            Maximum = 1,
+            Title = "Fraction"
+        });
 
-        var perturbedSeries = new ColumnSeries { Title = "Perturbed", FillColor = OxyColors.IndianRed };
-        perturbedSeries.Items.Add(new ColumnItem(perturbed.SingleFraction));
-        perturbedSeries.Items.Add(new ColumnItem(perturbed.DualFraction));
-        perturbedSeries.Items.Add(new ColumnItem(perturbed.CentroidFraction));
-        perturbedSeries.Items.Add(new ColumnItem(perturbed.UnknownFraction));
+        var baselineSeries = new LineSeries
+        {
+            Title = "Baseline",
+            StrokeThickness = 2,
+            MarkerType = MarkerType.Circle,
+            MarkerSize = 4,
+            Color = OxyColors.SteelBlue
+        };
+
+        var perturbedSeries = new LineSeries
+        {
+            Title = "Perturbed",
+            StrokeThickness = 2,
+            MarkerType = MarkerType.Square,
+            MarkerSize = 4,
+            Color = OxyColors.IndianRed
+        };
+
+        baselineSeries.Points.Add(new DataPoint(0, baseline.SingleFraction));
+        baselineSeries.Points.Add(new DataPoint(1, baseline.DualFraction));
+        baselineSeries.Points.Add(new DataPoint(2, baseline.CentroidFraction));
+        baselineSeries.Points.Add(new DataPoint(3, baseline.UnknownFraction));
+
+        perturbedSeries.Points.Add(new DataPoint(0, perturbed.SingleFraction));
+        perturbedSeries.Points.Add(new DataPoint(1, perturbed.DualFraction));
+        perturbedSeries.Points.Add(new DataPoint(2, perturbed.CentroidFraction));
+        perturbedSeries.Points.Add(new DataPoint(3, perturbed.UnknownFraction));
 
         model.Series.Add(baselineSeries);
         model.Series.Add(perturbedSeries);
