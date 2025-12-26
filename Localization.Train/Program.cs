@@ -855,7 +855,7 @@ internal static class Program
             SaveRocPrComparison(
                 baselineRandomClassifier.Probabilities,
                 permutedRandomClassifier.Probabilities,
-                Path.Combine(outputDir, "negative_control_channel_permutation_roc_pr.png"),
+                Path.Combine(outputDir, "negative_control_channel_permutation"),
                 "Baseline",
                 "Permuted");
 
@@ -921,7 +921,7 @@ internal static class Program
             SaveRocPrComparison(
                 rowPredictions.Select(p => (p.Label, (double)p.Prediction.Probability)).ToList(),
                 groupedPredictions.Select(p => (p.Label, (double)p.Prediction.Probability)).ToList(),
-                Path.Combine(outputDir, "negative_control_label_shuffle_roc_pr.png"),
+                Path.Combine(outputDir, "negative_control_label_shuffle"),
                 "Random holdout",
                 "Grouped holdout");
 
@@ -1151,28 +1151,55 @@ internal static class Program
     private static void SaveRocPrComparison(
         IReadOnlyList<(bool Label, double Probability)> baseline,
         IReadOnlyList<(bool Label, double Probability)> perturbed,
-        string outputPath,
+        string outputPathPrefix,
         string baselineLabel,
         string perturbedLabel)
     {
         var thresholds = Enumerable.Range(0, 501).Select(i => i / 500.0).ToArray();
 
-        var baselineRoc = thresholds.Select(t => ComputeRocPoint(baseline.Select(b => b.Label).ToList(), baseline.Select(b => b.Probability).ToList(), t)).ToList();
-        var perturbedRoc = thresholds.Select(t => ComputeRocPoint(perturbed.Select(b => b.Label).ToList(), perturbed.Select(b => b.Probability).ToList(), t)).ToList();
+        var baselineRoc = thresholds.Select(t =>
+            ComputeRocPoint(baseline.Select(b => b.Label).ToList(),
+                            baseline.Select(b => b.Probability).ToList(), t)).ToList();
 
-        var baselinePr = thresholds.Select(t => ComputePrPoint(baseline.Select(b => b.Label).ToList(), baseline.Select(b => b.Probability).ToList(), t)).ToList();
-        var perturbedPr = thresholds.Select(t => ComputePrPoint(perturbed.Select(b => b.Label).ToList(), perturbed.Select(b => b.Probability).ToList(), t)).ToList();
+        var perturbedRoc = thresholds.Select(t =>
+            ComputeRocPoint(perturbed.Select(b => b.Label).ToList(),
+                            perturbed.Select(b => b.Probability).ToList(), t)).ToList();
 
-        var rocModel = CreateNormalizedModel("Classifier ROC (negative control)", "False Positive Rate", "True Positive Rate");
-        var prModel = CreateNormalizedModel("Classifier PR (negative control)", "Recall", "Precision");
+        var baselinePr = thresholds.Select(t =>
+            ComputePrPoint(baseline.Select(b => b.Label).ToList(),
+                           baseline.Select(b => b.Probability).ToList(), t)).ToList();
 
-        AddCurve(rocModel, baselineRoc.Select(p => new DataPoint(p.FalsePositiveRate, p.TruePositiveRate)), baselineLabel, OxyColors.SteelBlue);
-        AddCurve(rocModel, perturbedRoc.Select(p => new DataPoint(p.FalsePositiveRate, p.TruePositiveRate)), perturbedLabel, OxyColors.IndianRed);
+        var perturbedPr = thresholds.Select(t =>
+            ComputePrPoint(perturbed.Select(b => b.Label).ToList(),
+                           perturbed.Select(b => b.Probability).ToList(), t)).ToList();
 
-        AddCurve(prModel, baselinePr.Select(p => new DataPoint(p.Recall, p.Precision)), baselineLabel, OxyColors.SteelBlue);
-        AddCurve(prModel, perturbedPr.Select(p => new DataPoint(p.Recall, p.Precision)), perturbedLabel, OxyColors.IndianRed);
+        var rocModel = CreateNormalizedModel("Classifier ROC (negative control)",
+            "False Positive Rate", "True Positive Rate");
 
-        SaveSideBySide(rocModel, prModel, outputPath, 900, 600);
+        var prModel = CreateNormalizedModel("Classifier PR (negative control)",
+            "Recall", "Precision");
+
+        AddCurve(rocModel,
+            baselineRoc.Select(p => new DataPoint(p.FalsePositiveRate, p.TruePositiveRate)),
+            baselineLabel, OxyColors.SteelBlue);
+
+        AddCurve(rocModel,
+            perturbedRoc.Select(p => new DataPoint(p.FalsePositiveRate, p.TruePositiveRate)),
+            perturbedLabel, OxyColors.IndianRed);
+
+        AddCurve(prModel,
+            baselinePr.Select(p => new DataPoint(p.Recall, p.Precision)),
+            baselineLabel, OxyColors.SteelBlue);
+
+        AddCurve(prModel,
+            perturbedPr.Select(p => new DataPoint(p.Recall, p.Precision)),
+            perturbedLabel, OxyColors.IndianRed);
+
+        using (var s = File.Open(outputPathPrefix + "_roc.png", FileMode.Create))
+            new PngExporter { Width = 900, Height = 600 }.Export(rocModel, s);
+
+        using (var s = File.Open(outputPathPrefix + "_pr.png", FileMode.Create))
+            new PngExporter { Width = 900, Height = 600 }.Export(prModel, s);
     }
 
     private static RocPoint ComputeRocPoint(IReadOnlyList<bool> labels, IReadOnlyList<double> probabilities, double threshold)
