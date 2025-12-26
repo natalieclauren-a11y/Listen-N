@@ -17,9 +17,8 @@ public sealed class LocalizationPipeline
     private readonly RegressionModelGroup _dualRegressor;
     private readonly MahalanobisScorer _mahalanobis;
     private readonly PipelineConfiguration _config;
-    private readonly CalibrationModel _calibrationModel;
 
-    public LocalizationPipeline(MLContext mlContext, FeatureBuilder featureBuilder, ITransformer classifier, RegressionModelGroup singleRegressor, RegressionModelGroup dualRegressor, MahalanobisScorer mahalanobis, PipelineConfiguration config, CalibrationModel? calibrationModel = null)
+    public LocalizationPipeline(MLContext mlContext, FeatureBuilder featureBuilder, ITransformer classifier, RegressionModelGroup singleRegressor, RegressionModelGroup dualRegressor, MahalanobisScorer mahalanobis, PipelineConfiguration config)
     {
         _mlContext = mlContext;
         _featureBuilder = featureBuilder;
@@ -28,7 +27,6 @@ public sealed class LocalizationPipeline
         _dualRegressor = dualRegressor;
         _mahalanobis = mahalanobis;
         _config = config;
-        _calibrationModel = calibrationModel ?? CalibrationModel.Identity();
     }
 
     public PredictionResult Predict(LocalizationRow row)
@@ -45,7 +43,8 @@ public sealed class LocalizationPipeline
             Features = features.FeatureVector.Select(f => (float)f).ToArray()
         });
 
-        double calibratedProbability = _calibrationModel.Apply(classPrediction.Probability);
+        double calibratedProbability = classPrediction.Probability;
+        double rawProbability = classPrediction.Probability;
 
         string label = classPrediction.PredictedLabel ? "Dual" : "Single";
         double[] coords = classPrediction.PredictedLabel
@@ -75,7 +74,7 @@ public sealed class LocalizationPipeline
                 MahalanobisDistance = distance,
                 IsOutOfDistribution = isOod,
                 FeatureNames = _featureBuilder.FeatureNames,
-                RawProbability = classPrediction.Probability,
+                RawProbability = rawProbability,
                 CalibratedProbability = calibratedProbability
             }
         };
@@ -112,8 +111,6 @@ public sealed class LocalizationPipeline
         };
         File.WriteAllText(Path.Combine(directory, "mahalanobis.json"), JsonSerializer.Serialize(mahaModel, new JsonSerializerOptions { WriteIndented = true }));
 
-        var calibrationPath = Path.Combine(directory, "calibration.json");
-        File.WriteAllText(calibrationPath, JsonSerializer.Serialize(_calibrationModel, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     public static LocalizationPipeline Load(string directory, MLContext? mlContext = null)
@@ -146,14 +143,7 @@ public sealed class LocalizationPipeline
             }
         }
 
-        CalibrationModel calibrationModel = CalibrationModel.Identity();
-        var calibrationPath = Path.Combine(directory, "calibration.json");
-        if (File.Exists(calibrationPath))
-        {
-            calibrationModel = JsonSerializer.Deserialize<CalibrationModel>(File.ReadAllText(calibrationPath)) ?? CalibrationModel.Identity();
-        }
-
-        return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config, calibrationModel);
+        return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config);
     }
 
     private static double[] ExtractOodFeatures(IReadOnlyList<double> features)
