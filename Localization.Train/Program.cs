@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using Microsoft.ML;
+using Microsoft.ML.Data;
 using Microsoft.ML.Trainers.FastTree;
 using Localization.ML;
 using OxyPlot;
@@ -36,7 +37,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         var trainer = new ModelTrainer();
@@ -51,7 +52,7 @@ internal static class Program
         var classificationExamples = allRows.Select(r =>
         {
             var features = featureBuilder.BuildFeatures(r.Channels, r.DurationSeconds).FeatureVector;
-            return new ClassificationExample { Label = r.IsDual, Features = features.Select(f => (float)f).ToArray() };
+            return (Row: r, Example: new ClassificationExample { Label = r.IsDual, Features = features.Select(f => (float)f).ToArray() });
         }).ToList();
 
         if (classificationExamples.Count == 0)
@@ -59,46 +60,47 @@ internal static class Program
             throw new InvalidOperationException("No training rows loaded. Check --data-dir and available dataset groups.");
         }
 
+        var allClassificationExamples = classificationExamples.Select(c => c.Example).ToList();
+
         const int reliabilityBins = 10;
 
-        var split = StratifiedThreeWaySplit(classificationExamples, calibrationFraction: 0.0, testFraction: 0.2, seed: 42);
-        var (classifierHoldoutModel, metrics, importances) = trainer.TrainClassifier(split.Train, split.Test);
-        var cv = trainer.CrossValidateClassifier(classificationExamples);
-        var randomCheck = trainer.RandomLabelSanityCheck(classificationExamples);
+        var split = StratifiedThreeWaySplit(allClassificationExamples, calibrationFraction: 0.0, testFraction: 0.2, seed: 42);
+        var (rowClassifierModel, rowMetrics, importances) = trainer.TrainClassifier(split.Train, split.Test);
+        var cv = trainer.CrossValidateClassifier(allClassificationExamples);
+        var randomCheck = trainer.RandomLabelSanityCheck(allClassificationExamples);
 
-        var predictionEngine = trainer.MlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(classifierHoldoutModel);
-        var testPredictions = split.Test
-            .Select(example => (Prediction: predictionEngine.Predict(example), example.Label))
-            .ToList();
+        var rowPredictions = BuildPredictions(trainer, rowClassifierModel, split.Test);
+        var rowSplitMetrics = BuildSplitMetrics(rowMetrics, rowPredictions);
 
-        int tp = 0, tn = 0, fp = 0, fn = 0;
-        foreach (var sample in testPredictions)
+        SplitMetrics? groupedSplitMetrics = null;
+        BinaryClassificationMetrics? groupedMlNetMetrics = null;
+        ITransformer classifierHoldoutModel = rowClassifierModel;
+        var featureImportances = importances;
+        var holdoutPredictions = rowPredictions;
+
+        if (useGroupedSplit)
         {
-            if (sample.Prediction.PredictedLabel && sample.Label)
+            var groupedSplit = Grouping.GroupSplit(allRows, 0.2, 42);
+            var groupedTrain = groupedSplit.Train.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+            var groupedHoldout = groupedSplit.Holdout.Select(r => BuildClassificationExample(featureBuilder, r)).ToList();
+
+            if (groupedTrain.Count == 0 || groupedHoldout.Count == 0)
             {
-                tp++;
-            }
-            else if (sample.Prediction.PredictedLabel && !sample.Label)
-            {
-                fp++;
-            }
-            else if (!sample.Prediction.PredictedLabel && !sample.Label)
-            {
-                tn++;
+                Console.WriteLine("Warning: grouped split produced empty train or holdout set; skipping grouped evaluation.");
             }
             else
             {
-                fn++;
+                var (groupedModel, groupedMetrics, groupedImportances) = trainer.TrainClassifier(groupedTrain, groupedHoldout);
+                var groupedPredictions = BuildPredictions(trainer, groupedModel, groupedHoldout);
+                groupedSplitMetrics = BuildSplitMetrics(groupedMetrics, groupedPredictions);
+                groupedMlNetMetrics = groupedMetrics;
+                classifierHoldoutModel = groupedModel;
+                featureImportances = groupedImportances;
+                holdoutPredictions = groupedPredictions;
             }
         }
 
-        double manualPrecision = tp + fp == 0 ? double.NaN : (double)tp / (tp + fp);
-        double manualRecall = tp + fn == 0 ? double.NaN : (double)tp / (tp + fn);
-        double manualF1 = double.IsNaN(manualPrecision) || double.IsNaN(manualRecall) || (manualPrecision + manualRecall) == 0
-            ? double.NaN
-            : 2 * manualPrecision * manualRecall / (manualPrecision + manualRecall);
-
-        var probabilitySamples = testPredictions
+        var probabilitySamples = holdoutPredictions
             .Select(p => (Probability: (double)p.Prediction.Probability, p.Label))
             .ToList();
         var brier = CalibrationModel.ComputeBrierScore(probabilitySamples);
@@ -106,32 +108,27 @@ internal static class Program
         var reliability = CalibrationModel.BuildReliabilityBins(probabilitySamples, reliabilityBins, p => p);
 
         Console.WriteLine("Classifier holdout metrics (ML.NET):");
-        Console.WriteLine($"  Accuracy: {metrics.Accuracy:F3}");
-        Console.WriteLine($"  Precision: {metrics.PositivePrecision:F3}");
-        Console.WriteLine($"  Recall: {metrics.PositiveRecall:F3}");
-        Console.WriteLine($"  F1: {metrics.F1Score:F3}");
-        Console.WriteLine("Manual confusion matrix (PredictedLabel vs. ground truth):");
-        Console.WriteLine($"  TP={tp}, FP={fp}, TN={tn}, FN={fn}");
-        Console.WriteLine($"  Manual Precision={manualPrecision:F3}, Recall={manualRecall:F3}, F1={manualF1:F3}");
-        Console.WriteLine("ML.NET confusion matrix (rows=actual [False, True], cols=predicted [False, True]):");
-        var matrix = metrics.ConfusionMatrix;
-        Console.WriteLine($"  TN={matrix.Counts[0][0]}, FP={matrix.Counts[0][1]}");
-        Console.WriteLine($"  FN={matrix.Counts[1][0]}, TP={matrix.Counts[1][1]}");
+        PrintClassifierMetrics(rowMetrics, rowSplitMetrics);
+
+        if (groupedSplitMetrics != null && groupedMlNetMetrics != null)
+        {
+            Console.WriteLine("Classifier grouped-holdout metrics:");
+            PrintClassifierMetrics(groupedMlNetMetrics, groupedSplitMetrics);
+        }
 
         Console.WriteLine($"Cross-validation accuracy: mean={cv.Mean:F3}, std={cv.Std:F3}");
         Console.WriteLine($"Random-label sanity accuracy: {randomCheck:F3}");
         Console.WriteLine("Top feature importances (AUC gain):");
-        foreach (var item in importances.OrderByDescending(i => i.Gain).Take(10))
+        foreach (var item in featureImportances.OrderByDescending(i => i.Gain).Take(10))
         {
             Console.WriteLine($"  {item.Feature}: {item.Gain:F5}");
         }
 
         Console.WriteLine("Reliability holdout (ML.NET Platt-calibrated probability | label):");
-        foreach (var sample in testPredictions.Take(5))
+        foreach (var sample in holdoutPredictions.Take(5))
         {
             Console.WriteLine($"  {sample.Prediction.Probability:F4} | label={(sample.Label ? 1 : 0)}");
         }
-
 
         var reliabilityPlot = BuildReliabilityDiagram(
             reliability,
@@ -162,9 +159,25 @@ internal static class Program
 
         double singleR2 = singleFeatures.Count == 0 ? double.NaN : TrainWithHoldout(trainer, singleFeatures, singleTargets, new[] { "x", "y", "z" });
         double dualR2 = dualFeatures.Count == 0 ? double.NaN : TrainWithHoldout(trainer, dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
+        double groupedSingleR2 = double.NaN;
+        double groupedDualR2 = double.NaN;
+
+        if (useGroupedSplit)
+        {
+            groupedSingleR2 = singleFeatures.Count == 0 ? double.NaN : TrainWithGroupedHoldout(trainer, singleRows, featureBuilder, new[] { "x", "y", "z" }, r => r.SingleCoordinates!);
+            groupedDualR2 = dualFeatures.Count == 0 ? double.NaN : TrainWithGroupedHoldout(trainer, dualRows, featureBuilder, new[] { "x1", "y1", "z1", "x2", "y2", "z2" }, r => r.DualCoordinates!);
+        }
 
         Console.WriteLine($"Single-source regressor R^2 (mean): {singleR2:F3}");
+        if (useGroupedSplit)
+        {
+            Console.WriteLine($"Single-source regressor grouped R^2 (mean): {groupedSingleR2:F3}");
+        }
         Console.WriteLine($"Dual-source regressor R^2 (mean): {dualR2:F3}");
+        if (useGroupedSplit)
+        {
+            Console.WriteLine($"Dual-source regressor grouped R^2 (mean): {groupedDualR2:F3}");
+        }
 
         // Fit final regressors on all data
         var singleRegressor = singleFeatures.Count == 0
@@ -175,7 +188,7 @@ internal static class Program
             : trainer.TrainMultiRegressor(dualFeatures, dualTargets, new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
 
         // OOD scoring
-        var oodFeatures = classificationExamples.Select(c => ExtractOodVector(c.Features)).ToList();
+        var oodFeatures = classificationExamples.Select(c => ExtractOodVector(c.Example.Features)).ToList();
         var mahalanobis = MahalanobisScorer.FromSamples(oodFeatures.Select(v => v.Select(x => (double)x).ToArray()));
         var oodDistances = oodFeatures.Select(v => mahalanobis.Score(v.Select(x => (double)x).ToArray())).ToList();
         double oodMean = oodDistances.Average();
@@ -193,16 +206,19 @@ internal static class Program
 
         var summary = new TrainingSummary
         {
-            HoldoutAccuracy = metrics.Accuracy,
-            HoldoutPrecision = metrics.PositivePrecision,
-            HoldoutRecall = metrics.PositiveRecall,
-            HoldoutF1 = metrics.F1Score,
+            HoldoutAccuracy = rowMetrics.Accuracy,
+            HoldoutPrecision = rowMetrics.PositivePrecision,
+            HoldoutRecall = rowMetrics.PositiveRecall,
+            HoldoutF1 = rowMetrics.F1Score,
+            GroupedHoldoutClassifier = groupedSplitMetrics,
             CrossValidationAccuracyMean = cv.Mean,
             CrossValidationAccuracyStd = cv.Std,
             RandomLabelAccuracy = randomCheck,
             SingleRegressorR2 = singleR2,
+            GroupedHoldoutSingleRegressor = !useGroupedSplit || double.IsNaN(groupedSingleR2) ? null : new RegressionMetrics { R2 = groupedSingleR2 },
             DualRegressorR2 = dualR2,
-            FeatureImportance = importances,
+            GroupedHoldoutDualRegressor = !useGroupedSplit || double.IsNaN(groupedDualR2) ? null : new RegressionMetrics { R2 = groupedDualR2 },
+            FeatureImportance = featureImportances,
             Calibration = calibrationReport
         };
 
@@ -398,11 +414,116 @@ internal static class Program
         };
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride) ParseArgs(string[] args)
+    private static ClassificationExample BuildClassificationExample(FeatureBuilder featureBuilder, LocalizationRow row)
+    {
+        var features = featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector;
+        return new ClassificationExample { Label = row.IsDual, Features = features.Select(f => (float)f).ToArray() };
+    }
+
+    private static List<(ClassificationPrediction Prediction, bool Label)> BuildPredictions(ModelTrainer trainer, ITransformer model, IReadOnlyList<ClassificationExample> examples)
+    {
+        var predictionEngine = trainer.MlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(model);
+        return examples.Select(example => (Prediction: predictionEngine.Predict(example), example.Label)).ToList();
+    }
+
+    private static SplitMetrics BuildSplitMetrics(BinaryClassificationMetrics metrics, IReadOnlyList<(ClassificationPrediction Prediction, bool Label)> predictions)
+    {
+        int tp = 0, tn = 0, fp = 0, fn = 0;
+        foreach (var sample in predictions)
+        {
+            if (sample.Prediction.PredictedLabel && sample.Label)
+            {
+                tp++;
+            }
+            else if (sample.Prediction.PredictedLabel && !sample.Label)
+            {
+                fp++;
+            }
+            else if (!sample.Prediction.PredictedLabel && !sample.Label)
+            {
+                tn++;
+            }
+            else
+            {
+                fn++;
+            }
+        }
+
+        double manualPrecision = tp + fp == 0 ? double.NaN : (double)tp / (tp + fp);
+        double manualRecall = tp + fn == 0 ? double.NaN : (double)tp / (tp + fn);
+        double manualF1 = double.IsNaN(manualPrecision) || double.IsNaN(manualRecall) || (manualPrecision + manualRecall) == 0
+            ? double.NaN
+            : 2 * manualPrecision * manualRecall / (manualPrecision + manualRecall);
+
+        return new SplitMetrics
+        {
+            Accuracy = metrics.Accuracy,
+            Precision = double.IsNaN(manualPrecision) ? metrics.PositivePrecision : manualPrecision,
+            Recall = double.IsNaN(manualRecall) ? metrics.PositiveRecall : manualRecall,
+            F1 = double.IsNaN(manualF1) ? metrics.F1Score : manualF1,
+            TruePositives = tp,
+            FalsePositives = fp,
+            TrueNegatives = tn,
+            FalseNegatives = fn
+        };
+    }
+
+    private static void PrintClassifierMetrics(BinaryClassificationMetrics metrics, SplitMetrics splitMetrics)
+    {
+        Console.WriteLine($"  Accuracy: {metrics.Accuracy:F3}");
+        Console.WriteLine($"  Precision: {metrics.PositivePrecision:F3}");
+        Console.WriteLine($"  Recall: {metrics.PositiveRecall:F3}");
+        Console.WriteLine($"  F1: {metrics.F1Score:F3}");
+        Console.WriteLine("Manual confusion matrix (PredictedLabel vs. ground truth):");
+        Console.WriteLine($"  TP={splitMetrics.TruePositives}, FP={splitMetrics.FalsePositives}, TN={splitMetrics.TrueNegatives}, FN={splitMetrics.FalseNegatives}");
+        Console.WriteLine($"  Manual Precision={splitMetrics.Precision:F3}, Recall={splitMetrics.Recall:F3}, F1={splitMetrics.F1:F3}");
+        Console.WriteLine("ML.NET confusion matrix (rows=actual [False, True], cols=predicted [False, True]):");
+        var matrix = metrics.ConfusionMatrix;
+        Console.WriteLine($"  TN={matrix.Counts[0][0]}, FP={matrix.Counts[0][1]}");
+        Console.WriteLine($"  FN={matrix.Counts[1][0]}, TP={matrix.Counts[1][1]}");
+    }
+
+    private static double TrainWithGroupedHoldout(ModelTrainer trainer, IReadOnlyList<LocalizationRow> rows, FeatureBuilder featureBuilder, IReadOnlyList<string> targetNames, Func<LocalizationRow, double[]> targetSelector)
+    {
+        if (rows.Count == 0)
+        {
+            return double.NaN;
+        }
+
+        var split = Grouping.GroupSplit(rows, 0.25, seed: 99);
+        if (split.Train.Count == 0 || split.Holdout.Count == 0)
+        {
+            return double.NaN;
+        }
+
+        var trainFeatures = new List<float[]>();
+        var trainTargets = new List<double[]>();
+        var testFeatures = new List<float[]>();
+        var testTargets = new List<double[]>();
+
+        foreach (var row in split.Train)
+        {
+            trainFeatures.Add(BuildClassificationExample(featureBuilder, row).Features);
+            trainTargets.Add(targetSelector(row));
+        }
+
+        foreach (var row in split.Holdout)
+        {
+            testFeatures.Add(BuildClassificationExample(featureBuilder, row).Features);
+            testTargets.Add(targetSelector(row));
+        }
+
+        var regressor = trainer.TrainMultiRegressor(trainFeatures, trainTargets, targetNames);
+        var r2 = ComputeR2(regressor, testFeatures, testTargets);
+        return r2;
+    }
+
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
         double? duration = null;
+        bool useGroupedSplit = false;
 
         foreach (var arg in args)
         {
@@ -418,9 +539,13 @@ internal static class Program
             {
                 duration = double.Parse(arg.Substring("--duration=".Length), CultureInfo.InvariantCulture);
             }
+            else if (arg.StartsWith("--use-grouped-split="))
+            {
+                useGroupedSplit = bool.Parse(arg.Substring("--use-grouped-split=".Length));
+            }
         }
 
-        return (dataDir, outputDir, duration);
+        return (dataDir, outputDir, duration, useGroupedSplit);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)

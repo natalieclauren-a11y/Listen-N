@@ -12,6 +12,7 @@ public sealed class LocalizationRow
     public bool IsDual { get; init; }
     public double[]? SingleCoordinates { get; init; }
     public double[]? DualCoordinates { get; init; }
+    public IReadOnlyDictionary<string, string>? Metadata { get; init; }
 }
 
 public sealed class ClassificationExample
@@ -73,13 +74,33 @@ public sealed class TrainingSummary
     public required double HoldoutPrecision { get; init; }
     public required double HoldoutRecall { get; init; }
     public required double HoldoutF1 { get; init; }
+    public SplitMetrics? GroupedHoldoutClassifier { get; init; }
     public required double CrossValidationAccuracyMean { get; init; }
     public required double CrossValidationAccuracyStd { get; init; }
     public required double RandomLabelAccuracy { get; init; }
     public required double SingleRegressorR2 { get; init; }
+    public RegressionMetrics? GroupedHoldoutSingleRegressor { get; init; }
     public required double DualRegressorR2 { get; init; }
+    public RegressionMetrics? GroupedHoldoutDualRegressor { get; init; }
     public required IReadOnlyList<FeatureImportanceItem> FeatureImportance { get; init; }
     public CalibrationReport? Calibration { get; init; }
+}
+
+public sealed class SplitMetrics
+{
+    public required double Accuracy { get; init; }
+    public required double Precision { get; init; }
+    public required double Recall { get; init; }
+    public required double F1 { get; init; }
+    public required int TruePositives { get; init; }
+    public required int FalsePositives { get; init; }
+    public required int TrueNegatives { get; init; }
+    public required int FalseNegatives { get; init; }
+}
+
+public sealed class RegressionMetrics
+{
+    public required double R2 { get; init; }
 }
 
 public sealed class PipelineConfiguration

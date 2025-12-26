@@ -48,19 +48,21 @@ internal static class DatasetLoader
         if (joinKey != null)
         {
             var metadataLookup = BuildMetadataLookup(coordinateTable, coordIndexes, joinKey);
-            foreach (var countRow in countsTable.Rows)
+            for (int rowIndex = 0; rowIndex < countsTable.Rows.Count; rowIndex++)
             {
+                var countRow = countsTable.Rows[rowIndex];
                 if (!TryGetValue(countsTable, countRow, joinKey, out var keyValue))
                 {
                     continue;
                 }
 
-                if (!metadataLookup.TryGetValue(keyValue, out var dualCoords))
+                if (!metadataLookup.TryGetValue(keyValue, out var metadataEntry))
                 {
                     continue;
                 }
 
-                rows.Add(CreateDualRow(countRow, channelIndexes, durationIndex, inferredDuration, dualCoords));
+                var metadata = ExtractMetadata(countsTable, countRow, rowIndex, joinKey, coordinateRowIndex: metadataEntry.RowIndex);
+                rows.Add(CreateDualRow(countRow, channelIndexes, durationIndex, inferredDuration, metadataEntry.Coords, metadata));
             }
         }
         else
@@ -69,7 +71,8 @@ internal static class DatasetLoader
             for (int i = 0; i < rowCount; i++)
             {
                 var dualCoords = ParseDualCoords(coordinateTable.Rows[i], coordIndexes);
-                rows.Add(CreateDualRow(countsTable.Rows[i], channelIndexes, durationIndex, inferredDuration, dualCoords));
+                var metadata = ExtractMetadata(countsTable, countsTable.Rows[i], i, joinKey: null, coordinateRowIndex: i);
+                rows.Add(CreateDualRow(countsTable.Rows[i], channelIndexes, durationIndex, inferredDuration, dualCoords, metadata));
             }
         }
 
@@ -111,8 +114,9 @@ internal static class DatasetLoader
         }
 
         var rows = new List<LocalizationRow>();
-        foreach (var cols in table.Rows)
+        for (int rowIndex = 0; rowIndex < table.Rows.Count; rowIndex++)
         {
+            var cols = table.Rows[rowIndex];
             double[] channels = new double[FeatureBuilder.ChannelCount];
             for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
             {
@@ -139,19 +143,22 @@ internal static class DatasetLoader
                     continue;
                 }
             }
+
+            var metadata = ExtractMetadata(table, cols, rowIndex, joinKey: null, coordinateRowIndex: rowIndex);
             rows.Add(new LocalizationRow
             {
                 Channels = channels,
                 DurationSeconds = duration,
                 IsDual = false,
-                SingleCoordinates = single
+                SingleCoordinates = single,
+                Metadata = metadata
             });
         }
 
         return rows;
     }
 
-    private static LocalizationRow CreateDualRow(string[] cols, int[] channelIndexes, int? durationIndex, double? inferredDuration, double[] dualCoords)
+    private static LocalizationRow CreateDualRow(string[] cols, int[] channelIndexes, int? durationIndex, double? inferredDuration, double[] dualCoords, IReadOnlyDictionary<string, string>? metadata)
     {
         double[] channels = new double[FeatureBuilder.ChannelCount];
         for (int i = 0; i < FeatureBuilder.ChannelCount; i++)
@@ -168,7 +175,8 @@ internal static class DatasetLoader
             Channels = channels,
             DurationSeconds = duration,
             IsDual = true,
-            DualCoordinates = dualCoords
+            DualCoordinates = dualCoords,
+            Metadata = metadata
         };
     }
 
@@ -237,20 +245,51 @@ internal static class DatasetLoader
         return dual;
     }
 
-    private static Dictionary<string, double[]> BuildMetadataLookup(Table table, int[] coordIndexes, string joinKey)
+    private static Dictionary<string, (double[] Coords, int RowIndex)> BuildMetadataLookup(Table table, int[] coordIndexes, string joinKey)
     {
-        var lookup = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var row in table.Rows)
+        var lookup = new Dictionary<string, (double[] Coords, int RowIndex)>(StringComparer.OrdinalIgnoreCase);
+        for (int rowIndex = 0; rowIndex < table.Rows.Count; rowIndex++)
         {
+            var row = table.Rows[rowIndex];
             if (!TryGetValue(table, row, joinKey, out var key))
             {
                 continue;
             }
 
-            lookup[key] = ParseDualCoords(row, coordIndexes);
+            lookup[key] = (ParseDualCoords(row, coordIndexes), rowIndex);
         }
 
         return lookup;
+    }
+
+    private static IReadOnlyDictionary<string, string>? ExtractMetadata(Table table, string[] row, int rowIndex, string? joinKey, int? coordinateRowIndex)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (joinKey != null && TryGetValue(table, row, joinKey, out var joinValue))
+        {
+            metadata[joinKey] = joinValue;
+        }
+
+        foreach (var candidate in new[] { "run", "run_id", "runid", "runidnum", "position", "position_index", "positionindex", "pair_id", "pairid", "pair", "id", "index", "row" })
+        {
+            if (metadata.ContainsKey(candidate))
+            {
+                continue;
+            }
+
+            if (TryGetValue(table, row, candidate, out var value))
+            {
+                metadata[candidate] = value;
+            }
+        }
+
+        metadata["row_index"] = rowIndex.ToString(CultureInfo.InvariantCulture);
+        if (coordinateRowIndex.HasValue)
+        {
+            metadata["coordinate_row_index"] = coordinateRowIndex.Value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return metadata.Count == 0 ? null : metadata;
     }
 
     private static string? FindJoinKey(string[] countHeaders, string[] metadataHeaders)
