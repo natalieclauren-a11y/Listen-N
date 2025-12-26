@@ -79,9 +79,9 @@ public sealed class TrainingSummary
     public required double CrossValidationAccuracyStd { get; init; }
     public required double RandomLabelAccuracy { get; init; }
     public required double SingleRegressorR2 { get; init; }
-    public RegressionMetrics? GroupedHoldoutSingleRegressor { get; init; }
+    public RegressionHoldoutSummary? GroupedHoldoutSingleRegressor { get; init; }
     public required double DualRegressorR2 { get; init; }
-    public RegressionMetrics? GroupedHoldoutDualRegressor { get; init; }
+    public RegressionHoldoutSummary? GroupedHoldoutDualRegressor { get; init; }
     public required IReadOnlyList<FeatureImportanceItem> FeatureImportance { get; init; }
     public CalibrationReport? Calibration { get; init; }
 }
@@ -98,7 +98,7 @@ public sealed class SplitMetrics
     public required int FalseNegatives { get; init; }
 }
 
-public sealed class RegressionMetrics
+public sealed class RegressionHoldoutSummary
 {
     public required double R2 { get; init; }
 }
