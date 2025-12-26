@@ -83,6 +83,7 @@ public sealed class TrainingSummary
     public required double DualRegressorR2 { get; init; }
     public RegressionHoldoutSummary? GroupedHoldoutDualRegressor { get; init; }
     public required IReadOnlyList<FeatureImportanceItem> FeatureImportance { get; init; }
+    public OodDetectorMetrics? OodDetectorMetrics { get; init; }
     public CalibrationReport? Calibration { get; init; }
 }
 
@@ -113,6 +114,16 @@ public sealed class PipelineConfiguration
     public IReadOnlyList<double> DipolePositions { get; set; } = Array.Empty<double>();
     public TrainingSummary? TrainingSummary { get; set; }
     public CalibrationReport? Calibration { get; set; }
+}
+
+public sealed class OodDetectorMetrics
+{
+    public double AucRoc { get; init; }
+    public double AucPr { get; init; }
+    public double SelectedThreshold { get; init; }
+    public double FalseAlarmRateAtThreshold { get; init; }
+    public double DetectionRateAtThreshold { get; init; }
+    public IReadOnlyDictionary<string, double>? DetectionRateByPerturbation { get; init; }
 }
 
 public sealed class CalibrationReport

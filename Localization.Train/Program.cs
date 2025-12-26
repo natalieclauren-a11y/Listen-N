@@ -37,7 +37,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         var trainer = new ModelTrainer();
@@ -64,12 +64,12 @@ internal static class Program
 
         const int reliabilityBins = 10;
 
-        var split = StratifiedThreeWaySplit(allClassificationExamples, calibrationFraction: 0.0, testFraction: 0.2, seed: 42);
-        var (rowClassifierModel, rowMetrics, importances) = trainer.TrainClassifier(split.Train, split.Test);
+        var split = StratifiedThreeWaySplit(classificationExamples, calibrationFraction: 0.0, testFraction: 0.2, seed: 42);
+        var (rowClassifierModel, rowMetrics, importances) = trainer.TrainClassifier(split.Train.Select(c => c.Example).ToList(), split.Test.Select(c => c.Example).ToList());
         var cv = trainer.CrossValidateClassifier(allClassificationExamples);
         var randomCheck = trainer.RandomLabelSanityCheck(allClassificationExamples);
 
-        var rowPredictions = BuildPredictions(trainer, rowClassifierModel, split.Test);
+        var rowPredictions = BuildPredictions(trainer, rowClassifierModel, split.Test.Select(c => c.Example).ToList());
         var rowSplitMetrics = BuildSplitMetrics(rowMetrics, rowPredictions);
 
         SplitMetrics? groupedSplitMetrics = null;
@@ -194,6 +194,48 @@ internal static class Program
         double oodMean = oodDistances.Average();
         double oodStd = Math.Sqrt(oodDistances.Average(d => Math.Pow(d - oodMean, 2)));
         double oodThreshold = oodMean + 3 * oodStd;
+        OodDetectorMetrics? oodMetrics = null;
+
+        if (validateOod && split.Test.Count > 0)
+        {
+            Console.WriteLine("OOD detector validation (Mahalanobis distance):");
+            var holdoutRows = split.Test.Select(r => r.Row).ToList();
+            var oodSamples = BuildOodSamples(holdoutRows, featureBuilder, mahalanobis, oodFaultFraction, oodSeed);
+            var evaluation = ComputeOodCurves(oodSamples, oodThreshold);
+
+            Console.WriteLine($"  AUC ROC: {evaluation.AucRoc:F3}");
+            Console.WriteLine($"  AUC PR: {evaluation.AucPr:F3}");
+            Console.WriteLine($"  Threshold={oodThreshold:F4}: FPR={evaluation.ThresholdFpr:F3}, TPR={evaluation.ThresholdTpr:F3}");
+            foreach (var kvp in evaluation.DetectionRateByType)
+            {
+                Console.WriteLine($"    {kvp.Key} detection rate: {kvp.Value:F3}");
+            }
+
+            var rocPlot = BuildRocPlot(evaluation.RocPoints, evaluation.ThresholdFpr, evaluation.ThresholdTpr);
+            var prPlot = BuildPrPlot(evaluation.PrPoints, evaluation.ThresholdRecall, evaluation.ThresholdPrecision);
+
+            var rocPath = Path.Combine(outputDir, "ood_roc.png");
+            var prPath = Path.Combine(outputDir, "ood_pr.png");
+            using (var stream = File.Open(rocPath, FileMode.Create))
+            {
+                new PngExporter { Width = 900, Height = 600 }.Export(rocPlot, stream);
+            }
+
+            using (var stream = File.Open(prPath, FileMode.Create))
+            {
+                new PngExporter { Width = 900, Height = 600 }.Export(prPlot, stream);
+            }
+
+            oodMetrics = new OodDetectorMetrics
+            {
+                AucRoc = evaluation.AucRoc,
+                AucPr = evaluation.AucPr,
+                SelectedThreshold = oodThreshold,
+                FalseAlarmRateAtThreshold = evaluation.ThresholdFpr,
+                DetectionRateAtThreshold = evaluation.ThresholdTpr,
+                DetectionRateByPerturbation = evaluation.DetectionRateByType
+            };
+        }
 
         var calibrationReport = new CalibrationReport
         {
@@ -219,6 +261,7 @@ internal static class Program
             DualRegressorR2 = dualR2,
             GroupedHoldoutDualRegressor = !useGroupedSplit || double.IsNaN(groupedDualR2) ? null : new RegressionHoldoutSummary { R2 = groupedDualR2 },
             FeatureImportance = featureImportances,
+            OodDetectorMetrics = oodMetrics,
             Calibration = calibrationReport
         };
 
@@ -327,12 +370,12 @@ internal static class Program
         return valid == 0 ? double.NaN : r2Mean / valid;
     }
 
-    private static (IReadOnlyList<ClassificationExample> Train, IReadOnlyList<ClassificationExample> Calibration, IReadOnlyList<ClassificationExample> Test) StratifiedThreeWaySplit(IReadOnlyList<ClassificationExample> data, double calibrationFraction, double testFraction, int seed)
+    private static (IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> Train, IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> Calibration, IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> Test) StratifiedThreeWaySplit(IReadOnlyList<(LocalizationRow Row, ClassificationExample Example)> data, double calibrationFraction, double testFraction, int seed)
     {
-        var grouped = data.GroupBy(d => d.Label).ToDictionary(g => g.Key, g => g.ToList());
-        var train = new List<ClassificationExample>();
-        var calibration = new List<ClassificationExample>();
-        var test = new List<ClassificationExample>();
+        var grouped = data.GroupBy(d => d.Example.Label).ToDictionary(g => g.Key, g => g.ToList());
+        var train = new List<(LocalizationRow Row, ClassificationExample Example)>();
+        var calibration = new List<(LocalizationRow Row, ClassificationExample Example)>();
+        var test = new List<(LocalizationRow Row, ClassificationExample Example)>();
         var rnd = new Random(seed);
 
         foreach (var kvp in grouped)
@@ -412,6 +455,250 @@ internal static class Program
             features[offset + 2],
             features[offset + 3]
         };
+    }
+
+    private static List<OodSample> BuildOodSamples(IReadOnlyList<LocalizationRow> holdoutRows, FeatureBuilder featureBuilder, MahalanobisScorer mahalanobis, double faultFraction, int seed)
+    {
+        var samples = new List<OodSample>();
+        var rnd = new Random(seed);
+
+        foreach (var row in holdoutRows)
+        {
+            samples.Add(ScoreRow(row, false, "Clean"));
+        }
+
+        int targetPositives = (int)Math.Round(holdoutRows.Count * Math.Max(0, faultFraction));
+        if (targetPositives == 0 && faultFraction > 0 && holdoutRows.Count > 0)
+        {
+            targetPositives = 1;
+        }
+
+        var faultTypes = Enum.GetValues<FaultType>();
+        for (int i = 0; i < targetPositives; i++)
+        {
+            var baseRow = holdoutRows[rnd.Next(holdoutRows.Count)];
+            var fault = faultTypes[rnd.Next(faultTypes.Length)];
+            var perturbed = ApplyFaultPerturbation(baseRow, fault, rnd);
+            samples.Add(ScoreRow(perturbed, true, fault.ToString()));
+        }
+
+        return samples;
+
+        OodSample ScoreRow(LocalizationRow row, bool isOod, string perturbation)
+        {
+            var features = featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray();
+            var oodVector = ExtractOodVector(features);
+            double distance = mahalanobis.Score(oodVector.Select(v => (double)v).ToArray());
+            return new OodSample(distance, isOod, perturbation);
+        }
+    }
+
+    private static OodEvaluationResult ComputeOodCurves(IReadOnlyList<OodSample> samples, double threshold)
+    {
+        int positives = samples.Count(s => s.IsOod);
+        int negatives = samples.Count - positives;
+
+        var thresholds = new List<double> { double.PositiveInfinity };
+        thresholds.AddRange(samples.Select(s => s.Distance).Distinct().OrderByDescending(d => d));
+
+        var rocPoints = new List<DataPoint>();
+        var prPoints = new List<DataPoint>();
+
+        double prevFpr = 0;
+        double prevTpr = 0;
+        double prevRecall = 0;
+        double prevPrecision = 1;
+        double aucRoc = 0;
+        double aucPr = 0;
+
+        foreach (var thr in thresholds)
+        {
+            var metrics = EvaluateAt(samples, thr, positives, negatives);
+            rocPoints.Add(new DataPoint(metrics.Fpr, metrics.Tpr));
+            prPoints.Add(new DataPoint(metrics.Recall, metrics.Precision));
+
+            aucRoc += (metrics.Fpr - prevFpr) * (metrics.Tpr + prevTpr) / 2.0;
+            aucPr += (metrics.Recall - prevRecall) * (metrics.Precision + prevPrecision) / 2.0;
+            prevFpr = metrics.Fpr;
+            prevTpr = metrics.Tpr;
+            prevRecall = metrics.Recall;
+            prevPrecision = metrics.Precision;
+        }
+
+        var thresholdMetrics = EvaluateAt(samples, threshold, positives, negatives);
+        var detectionByType = samples
+            .Where(s => s.IsOod)
+            .GroupBy(s => s.PerturbationType)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Count() == 0 ? double.NaN : (double)g.Count(s => s.Distance >= threshold) / g.Count());
+
+        return new OodEvaluationResult
+        {
+            RocPoints = rocPoints,
+            PrPoints = prPoints,
+            AucRoc = double.IsNaN(aucRoc) ? 0 : aucRoc,
+            AucPr = double.IsNaN(aucPr) ? 0 : aucPr,
+            ThresholdFpr = thresholdMetrics.Fpr,
+            ThresholdTpr = thresholdMetrics.Tpr,
+            ThresholdPrecision = thresholdMetrics.Precision,
+            ThresholdRecall = thresholdMetrics.Recall,
+            DetectionRateByType = detectionByType
+        };
+    }
+
+    private static PlotModel BuildRocPlot(IReadOnlyList<DataPoint> points, double thresholdFpr, double thresholdTpr)
+    {
+        var model = new PlotModel { Title = "OOD ROC" };
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Minimum = 0, Maximum = 1, Title = "False Positive Rate" });
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Minimum = 0, Maximum = 1, Title = "True Positive Rate" });
+
+        var series = new LineSeries { Color = OxyColors.SteelBlue, StrokeThickness = 2 };
+        foreach (var point in points.OrderBy(p => p.X))
+        {
+            series.Points.Add(point);
+        }
+
+        var thresholdSeries = new ScatterSeries
+        {
+            MarkerType = MarkerType.Circle,
+            MarkerFill = OxyColors.IndianRed,
+            MarkerStroke = OxyColors.DarkRed,
+            MarkerStrokeThickness = 1.5,
+            MarkerSize = 5
+        };
+        if (!double.IsNaN(thresholdFpr) && !double.IsNaN(thresholdTpr))
+        {
+            thresholdSeries.Points.Add(new ScatterPoint(thresholdFpr, thresholdTpr));
+        }
+
+        model.Series.Add(series);
+        model.Series.Add(thresholdSeries);
+        return model;
+    }
+
+    private static (double Fpr, double Tpr, double Precision, double Recall) EvaluateAt(IReadOnlyList<OodSample> samples, double threshold, int positives, int negatives)
+    {
+        int tp = samples.Count(s => s.IsOod && s.Distance >= threshold);
+        int fp = samples.Count(s => !s.IsOod && s.Distance >= threshold);
+        int fn = samples.Count(s => s.IsOod && s.Distance < threshold);
+
+        double tpr = positives == 0 ? double.NaN : (double)tp / positives;
+        double fpr = negatives == 0 ? double.NaN : (double)fp / negatives;
+        double precision = tp + fp == 0 ? 1.0 : (double)tp / (tp + fp);
+        double recall = positives == 0 ? double.NaN : (double)tp / positives;
+        return (fpr, tpr, precision, recall);
+    }
+
+    private static LocalizationRow ApplyFaultPerturbation(LocalizationRow row, FaultType fault, Random rnd)
+    {
+        var channels = row.Channels.ToArray();
+        double? duration = row.DurationSeconds;
+
+        switch (fault)
+        {
+            case FaultType.DeadTube:
+            {
+                int deadCount = rnd.Next(1, 3);
+                foreach (var idx in Enumerable.Range(0, FeatureBuilder.ChannelCount).OrderBy(_ => rnd.Next()).Take(deadCount))
+                {
+                    channels[idx] = 0;
+                }
+                break;
+            }
+            case FaultType.GainDrift:
+            {
+                int count = rnd.Next(3, 6);
+                bool attenuate = rnd.NextDouble() < 0.5;
+                double min = attenuate ? 0.5 : 1.2;
+                double max = attenuate ? 0.8 : 1.8;
+                double factor = min + rnd.NextDouble() * (max - min);
+                foreach (var idx in Enumerable.Range(0, FeatureBuilder.ChannelCount).OrderBy(_ => rnd.Next()).Take(count))
+                {
+                    channels[idx] *= factor;
+                }
+                break;
+            }
+            case FaultType.Flattening:
+            {
+                double mean = channels.Average();
+                double alpha = 0.5 + rnd.NextDouble() * 0.4;
+                for (int i = 0; i < channels.Length; i++)
+                {
+                    channels[i] = (1 - alpha) * channels[i] + alpha * mean;
+                }
+                break;
+            }
+            case FaultType.DurationMismatch:
+            {
+                double factor = rnd.NextDouble() < 0.5 ? 0.5 : 2.0;
+                duration = (duration ?? 1.0) * factor;
+                break;
+            }
+        }
+
+        return new LocalizationRow
+        {
+            Channels = channels,
+            DurationSeconds = duration,
+            IsDual = row.IsDual,
+            SingleCoordinates = row.SingleCoordinates,
+            DualCoordinates = row.DualCoordinates,
+            Metadata = row.Metadata
+        };
+    }
+
+    private enum FaultType
+    {
+        DeadTube,
+        GainDrift,
+        Flattening,
+        DurationMismatch
+    }
+
+    private sealed record OodSample(double Distance, bool IsOod, string PerturbationType);
+
+    private sealed class OodEvaluationResult
+    {
+        public required IReadOnlyList<DataPoint> RocPoints { get; init; }
+        public required IReadOnlyList<DataPoint> PrPoints { get; init; }
+        public required double AucRoc { get; init; }
+        public required double AucPr { get; init; }
+        public required double ThresholdFpr { get; init; }
+        public required double ThresholdTpr { get; init; }
+        public required double ThresholdPrecision { get; init; }
+        public required double ThresholdRecall { get; init; }
+        public required IReadOnlyDictionary<string, double> DetectionRateByType { get; init; }
+    }
+
+    private static PlotModel BuildPrPlot(IReadOnlyList<DataPoint> points, double thresholdRecall, double thresholdPrecision)
+    {
+        var model = new PlotModel { Title = "OOD Precision-Recall" };
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Minimum = 0, Maximum = 1, Title = "Recall" });
+        model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Minimum = 0, Maximum = 1, Title = "Precision" });
+
+        var series = new LineSeries { Color = OxyColors.SeaGreen, StrokeThickness = 2 };
+        foreach (var point in points.OrderBy(p => p.X))
+        {
+            series.Points.Add(point);
+        }
+
+        var thresholdSeries = new ScatterSeries
+        {
+            MarkerType = MarkerType.Diamond,
+            MarkerFill = OxyColors.DarkOrange,
+            MarkerStroke = OxyColors.Brown,
+            MarkerStrokeThickness = 1.5,
+            MarkerSize = 5
+        };
+        if (!double.IsNaN(thresholdRecall) && !double.IsNaN(thresholdPrecision))
+        {
+            thresholdSeries.Points.Add(new ScatterPoint(thresholdRecall, thresholdPrecision));
+        }
+
+        model.Series.Add(series);
+        model.Series.Add(thresholdSeries);
+        return model;
     }
 
     private static ClassificationExample BuildClassificationExample(FeatureBuilder featureBuilder, LocalizationRow row)
@@ -518,12 +805,15 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
         double? duration = null;
         bool useGroupedSplit = false;
+        bool validateOod = true;
+        double oodFaultFraction = 0.5;
+        int oodSeed = 123;
 
         foreach (var arg in args)
         {
@@ -543,9 +833,21 @@ internal static class Program
             {
                 useGroupedSplit = bool.Parse(arg.Substring("--use-grouped-split=".Length));
             }
+            else if (arg.StartsWith("--validate-ood="))
+            {
+                validateOod = bool.Parse(arg.Substring("--validate-ood=".Length));
+            }
+            else if (arg.StartsWith("--ood-fault-fraction="))
+            {
+                oodFaultFraction = double.Parse(arg.Substring("--ood-fault-fraction=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--ood-seed="))
+            {
+                oodSeed = int.Parse(arg.Substring("--ood-seed=".Length), CultureInfo.InvariantCulture);
+            }
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit);
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
