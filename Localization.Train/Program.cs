@@ -43,6 +43,21 @@ internal static class Program
 
     private sealed record ErrorDiagnosticPoint(double X, double ErrorCm, string Regime);
 
+    private sealed record CoverageSummary(int Single, int Dual, int Centroid, int Unknown)
+    {
+        public int Total => Single + Dual + Centroid + Unknown;
+
+        public double SingleFraction => Fraction(Single);
+
+        public double DualFraction => Fraction(Dual);
+
+        public double CentroidFraction => Fraction(Centroid);
+
+        public double UnknownFraction => Fraction(Unknown);
+
+        private double Fraction(int count) => Total == 0 ? double.NaN : (double)count / Total;
+    }
+
     public static void Main(string[] args)
     {
         var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl) = ParseArgs(args);
@@ -294,6 +309,7 @@ internal static class Program
         Console.WriteLine($"Artifacts saved to {outputDir}");
 
         var randomHoldoutRows = split.Test.Select(t => t.Row).ToList();
+        var randomCoverage = ComputeCoverage(pipeline, randomHoldoutRows);
         SaveErrorDiagnostics(
             pipeline,
             randomHoldoutRows,
@@ -303,8 +319,16 @@ internal static class Program
             Path.Combine(outputDir, "error_vs_distance_random.json"),
             Path.Combine(outputDir, "error_vs_counts_random.json"));
 
+        SaveCoverageArtifacts(
+            randomCoverage,
+            config,
+            Path.Combine(outputDir, "coverage_random.json"),
+            Path.Combine(outputDir, "coverage_random.png"),
+            "Coverage (random holdout)");
+
         if (groupedSplit is { Holdout: { } groupedHoldout } && groupedHoldout.Count > 0)
         {
+            var groupedCoverage = ComputeCoverage(pipeline, groupedHoldout);
             SaveErrorDiagnostics(
                 pipeline,
                 groupedHoldout,
@@ -313,6 +337,13 @@ internal static class Program
                 Path.Combine(outputDir, "error_vs_counts_grouped.png"),
                 Path.Combine(outputDir, "error_vs_distance_grouped.json"),
                 Path.Combine(outputDir, "error_vs_counts_grouped.json"));
+
+            SaveCoverageArtifacts(
+                groupedCoverage,
+                config,
+                Path.Combine(outputDir, "coverage_grouped.json"),
+                Path.Combine(outputDir, "coverage_grouped.png"),
+                "Coverage (grouped holdout)");
         }
 
         if (runPermutationControl || runLabelShuffleControl)
@@ -328,7 +359,8 @@ internal static class Program
                 outputDir,
                 negativeControlSeed,
                 runPermutationControl,
-                runLabelShuffleControl);
+                runLabelShuffleControl,
+                config);
         }
     }
 
@@ -840,7 +872,8 @@ internal static class Program
         string outputDir,
         int negativeControlSeed,
         bool runPermutationControl,
-        bool runLabelShuffleControl)
+        bool runLabelShuffleControl,
+        PipelineConfiguration config)
     {
         var allRows = singleRows.Concat(dualRows).ToList();
         var groupedSplit = Grouping.GroupSplit(allRows, 0.2, 42);
@@ -864,6 +897,11 @@ internal static class Program
 
             var baselineGroupedLocalization = EvaluateLocalization(pipeline, groupedHoldoutRows, null);
             var permutedGroupedLocalization = EvaluateLocalization(pipeline, groupedHoldoutRows, permutation);
+
+            var baselineRandomCoverage = ComputeCoverage(pipeline, randomHoldoutRows);
+            var permutedRandomCoverage = ComputeCoverage(pipeline, randomHoldoutRows, permutation);
+            var baselineGroupedCoverage = ComputeCoverage(pipeline, groupedHoldoutRows);
+            var permutedGroupedCoverage = ComputeCoverage(pipeline, groupedHoldoutRows, permutation);
 
             var channelPermutationSummary = new NegativeControlChannelPermutationSummary
             {
@@ -907,6 +945,28 @@ internal static class Program
                 baselineRandomLocalization.Routing,
                 permutedRandomLocalization.Routing,
                 Path.Combine(outputDir, "negative_control_channel_permutation_routing.png"));
+
+            var coveragePayload = new
+            {
+                Seed = negativeControlSeed,
+                Thresholds = new
+                {
+                    ProbabilityThreshold = config.StrictProbability,
+                    OutOfDistributionThreshold = config.OutOfDistributionThreshold
+                },
+                RandomHoldout = new { Baseline = baselineRandomCoverage, Permuted = permutedRandomCoverage },
+                GroupedHoldout = new { Baseline = baselineGroupedCoverage, Permuted = permutedGroupedCoverage }
+            };
+
+            File.WriteAllText(
+                Path.Combine(outputDir, "negative_control_channel_permutation_coverage.json"),
+                JsonSerializer.Serialize(coveragePayload, JsonWithNamedFloats));
+
+            SaveCoveragePlot(
+                "Negative control: channel permutation coverage (random holdout)",
+                Path.Combine(outputDir, "negative_control_channel_permutation_coverage.png"),
+                ("Baseline", baselineRandomCoverage),
+                ("Permuted", permutedRandomCoverage));
 
             const int diagnosticBins = 20;
             var (baselineDistancePoints, baselineCountPoints) = BuildErrorDiagnosticPoints(pipeline, randomHoldoutRows, null);
@@ -1103,6 +1163,96 @@ internal static class Program
         };
 
         return new LocalizationEvaluationResult(singleErrors, dualErrors, routing);
+    }
+
+    private static void SaveCoverageArtifacts(CoverageSummary coverage, PipelineConfiguration config, string jsonPath, string plotPath, string title)
+    {
+        var payload = new
+        {
+            Coverage = coverage,
+            Thresholds = new
+            {
+                ProbabilityThreshold = config.StrictProbability,
+                OutOfDistributionThreshold = config.OutOfDistributionThreshold
+            }
+        };
+
+        File.WriteAllText(jsonPath, JsonSerializer.Serialize(payload, JsonWithNamedFloats));
+        SaveCoveragePlot(title, plotPath, ("Coverage", coverage));
+    }
+
+    private static void SaveCoveragePlot(string title, string outputPath, params (string Label, CoverageSummary Coverage)[] series)
+    {
+        var model = new PlotModel { Title = title };
+
+        var categoryAxis = new CategoryAxis
+        {
+            Position = AxisPosition.Bottom
+        };
+        categoryAxis.Labels.AddRange(new[] { "Single", "Dual", "Centroid", "Unknown" });
+        model.Axes.Add(categoryAxis);
+
+        model.Axes.Add(new LinearAxis
+        {
+            Position = AxisPosition.Left,
+            Minimum = 0,
+            Maximum = 1,
+            Title = "Fraction"
+        });
+
+        var colors = new[] { OxyColors.SteelBlue, OxyColors.IndianRed, OxyColors.DarkOliveGreen, OxyColors.SlateGray };
+
+        for (int i = 0; i < series.Length; i++)
+        {
+            var line = new LineSeries
+            {
+                Title = series[i].Label,
+                StrokeThickness = 2,
+                MarkerType = MarkerType.Circle,
+                MarkerSize = 4,
+                Color = colors[i % colors.Length]
+            };
+
+            var coverage = series[i].Coverage;
+            line.Points.Add(new DataPoint(0, coverage.SingleFraction));
+            line.Points.Add(new DataPoint(1, coverage.DualFraction));
+            line.Points.Add(new DataPoint(2, coverage.CentroidFraction));
+            line.Points.Add(new DataPoint(3, coverage.UnknownFraction));
+
+            model.Series.Add(line);
+        }
+
+        using var stream = File.Open(outputPath, FileMode.Create);
+        new PngExporter { Width = 900, Height = 600 }.Export(model, stream);
+    }
+
+    private static CoverageSummary ComputeCoverage(LocalizationPipeline pipeline, IReadOnlyList<LocalizationRow> rows, IReadOnlyList<int>? permutation = null)
+    {
+        int single = 0, dual = 0, centroid = 0, unknown = 0;
+
+        foreach (var row in rows)
+        {
+            var prediction = pipeline.Predict(row, permutation);
+
+            if (prediction.Label.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                unknown++;
+            }
+            else if (prediction.Label.Contains("centroid", StringComparison.OrdinalIgnoreCase))
+            {
+                centroid++;
+            }
+            else if (prediction.Label.StartsWith("Dual", StringComparison.OrdinalIgnoreCase))
+            {
+                dual++;
+            }
+            else
+            {
+                single++;
+            }
+        }
+
+        return new CoverageSummary(single, dual, centroid, unknown);
     }
 
     private static LocalizationErrorSummary SummarizeErrors(IReadOnlyList<double> errors)
