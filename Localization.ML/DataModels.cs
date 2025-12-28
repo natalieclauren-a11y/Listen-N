@@ -110,8 +110,13 @@ public sealed class PipelineConfiguration
     public double OutOfDistributionThreshold { get; set; }
     public double MinimumSeparationCm { get; set; }
     public double StrictProbability { get; set; }
+    public string SchemaVersion { get; set; } = string.Empty;
+    public string SchemaHash { get; set; } = string.Empty;
     public IReadOnlyList<string> FeatureNames { get; set; } = Array.Empty<string>();
+    public IReadOnlyList<string> FeatureColumns { get; set; } = Array.Empty<string>();
     public IReadOnlyList<double> DipolePositions { get; set; } = Array.Empty<double>();
+    public string? ClassifierTrainer { get; set; }
+    public IReadOnlyList<string>? RegressorTrainers { get; set; }
     public TrainingSummary? TrainingSummary { get; set; }
     public CalibrationReport? Calibration { get; set; }
 }

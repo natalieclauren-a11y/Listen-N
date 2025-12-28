@@ -95,6 +95,7 @@ public sealed class LocalizationPipeline
 
         var config = _config;
         config.FeatureNames = _featureBuilder.FeatureNames;
+        config.FeatureColumns = _featureBuilder.FeatureNames;
         config.DipolePositions = _featureBuilder.DipolePositions;
         var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(Path.Combine(directory, "pipeline_config.json"), json);
@@ -121,6 +122,13 @@ public sealed class LocalizationPipeline
 
         var configText = File.ReadAllText(Path.Combine(directory, "pipeline_config.json"));
         var config = JsonSerializer.Deserialize<PipelineConfiguration>(configText) ?? throw new InvalidOperationException("Missing pipeline configuration");
+        config.SchemaVersion = string.IsNullOrWhiteSpace(config.SchemaVersion)
+            ? SchemaStampBuilder.DefaultSchemaVersion
+            : config.SchemaVersion;
+        if (config.FeatureColumns.Count == 0)
+        {
+            config.FeatureColumns = config.FeatureNames;
+        }
         var featureBuilder = new FeatureBuilder(config.Epsilon, config.DipolePositions);
 
         using var fs = File.OpenRead(Path.Combine(directory, "classifier.zip"));
