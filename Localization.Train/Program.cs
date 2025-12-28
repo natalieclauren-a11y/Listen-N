@@ -297,16 +297,24 @@ internal static class Program
             MinimumSeparationCm = 8,
             StrictProbability = 0.98,
             FeatureNames = featureBuilder.FeatureNames,
+            FeatureColumns = featureBuilder.FeatureNames,
             DipolePositions = featureBuilder.DipolePositions,
+            ClassifierTrainer = "FastForestBinary",
+            RegressorTrainers = new[] { "FastForestRegression", "FastForestRegression" },
             TrainingSummary = summary,
             Calibration = calibrationReport
         };
+
+        var schemaStamp = SchemaStampBuilder.Build(config, featureBuilder, config.ClassifierTrainer!, config.RegressorTrainers!);
+        config.SchemaVersion = SchemaStampBuilder.DefaultSchemaVersion;
+        config.SchemaHash = SchemaStampBuilder.ComputeHash(schemaStamp);
 
         var pipeline = new LocalizationPipeline(trainer.MlContext, featureBuilder, classifierHoldoutModel, singleRegressor, dualRegressor, mahalanobis, config);
         pipeline.Save(outputDir);
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"Artifacts saved to {outputDir}");
+        Console.WriteLine($"Artifact schema: SchemaVersion={config.SchemaVersion}, SchemaHash={config.SchemaHash}");
 
         var randomHoldoutRows = split.Test.Select(t => t.Row).ToList();
         var randomCoverage = ComputeCoverage(pipeline, randomHoldoutRows);
