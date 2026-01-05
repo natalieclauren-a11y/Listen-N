@@ -65,8 +65,36 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
+
+        if (emitLockedSchemaTex)
+        {
+            var builder = new FeatureBuilder();
+            string outputPath = lockedTexOutPath ?? Path.Combine(outputDir, "locked_feature_schema.tex");
+            string tex = LockedSchemaTexWriter.BuildLockedFeatureSchemaTableTex(builder, lockedTexCaption, lockedTexLabel);
+            LockedSchemaTexWriter.WriteTo(outputPath, tex);
+
+            Console.WriteLine($"Locked schema LaTeX written to {outputPath}");
+            Console.WriteLine($"Feature count: {builder.FeatureNames.Count}");
+
+            var config = new PipelineConfiguration
+            {
+                Epsilon = builder.Epsilon,
+                OutOfDistributionThreshold = 0,
+                MinimumSeparationCm = 8,
+                StrictProbability = 0.98,
+                FeatureNames = builder.FeatureNames,
+                FeatureColumns = builder.FeatureNames,
+                DipolePositions = builder.DipolePositions,
+                ClassifierTrainer = "FastForestBinary",
+                RegressorTrainers = new[] { "FastForestRegression", "FastForestRegression" }
+            };
+
+            var schemaStamp = SchemaStampBuilder.Build(config, builder, config.ClassifierTrainer!, config.RegressorTrainers!);
+            Console.WriteLine($"Schema hash: {SchemaStampBuilder.ComputeHash(schemaStamp)}");
+            return;
+        }
 
         if (emitFeatureSchemaTex)
         {
@@ -2113,7 +2141,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2130,6 +2158,10 @@ internal static class Program
         string? texOutPath = null;
         string texCaption = "Raw feature schema derived from sliding analysis windows.";
         string texLabel = "tab:raw_feature_schema";
+        bool emitLockedSchemaTex = false;
+        string? lockedTexOutPath = null;
+        string lockedTexCaption = "Locked feature schema and ordering used for both training and runtime inference.";
+        string lockedTexLabel = "tab:locked_feature_schema";
         bool emitNormalizationFigure = false;
         string? normFigOutPath = null;
         string normFigRegime = "single";
@@ -2204,6 +2236,22 @@ internal static class Program
             else if (arg.StartsWith("--tex-label="))
             {
                 texLabel = arg.Substring("--tex-label=".Length);
+            }
+            else if (arg.StartsWith("--emit-locked-schema-tex="))
+            {
+                emitLockedSchemaTex = bool.Parse(arg.Substring("--emit-locked-schema-tex=".Length));
+            }
+            else if (arg.StartsWith("--locked-tex-out="))
+            {
+                lockedTexOutPath = arg.Substring("--locked-tex-out=".Length);
+            }
+            else if (arg.StartsWith("--locked-tex-caption="))
+            {
+                lockedTexCaption = arg.Substring("--locked-tex-caption=".Length);
+            }
+            else if (arg.StartsWith("--locked-tex-label="))
+            {
+                lockedTexLabel = arg.Substring("--locked-tex-label=".Length);
             }
             else if (arg.StartsWith("--emit-normalization-figure="))
             {
@@ -2285,7 +2333,7 @@ internal static class Program
             throw new ArgumentException("--descfig-bins must be positive");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle);
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
