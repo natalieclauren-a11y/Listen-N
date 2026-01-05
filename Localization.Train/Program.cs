@@ -79,7 +79,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitLockedSchemaTex)
@@ -90,6 +90,7 @@ internal static class Program
             {
                 Epsilon = builder.Epsilon,
                 OutOfDistributionThreshold = 0,
+                ClassifierThreshold = 0.5,
                 MinimumSeparationCm = 8,
                 StrictProbability = 0.98,
                 FeatureNames = builder.FeatureNames,
@@ -229,10 +230,25 @@ internal static class Program
                 useGroupedSplit);
             return;
         }
+
+        if (emitClassifierFigure)
+        {
+            GenerateClassifierFigure(
+                dataDir,
+                outputDir,
+                durationOverride,
+                clfFigOutPath,
+                clfFigTitle,
+                clfFigMaxPoints,
+                clfFigThreshold,
+                clfFigRegime,
+                useGroupedSplit);
+            return;
+        }
       if (emitNormalizationFigure)
                 {
                         var singleRowsForNorm = LoadSingleGroups(dataDir, durationOverride);
-			var dualRowsForNorm = LoadDualGroups(dataDir, durationOverride);
+                        var dualRowsForNorm = LoadDualGroups(dataDir, durationOverride);
 		
 			var selection = FindNormalizationExamples(singleRowsForNorm, dualRowsForNorm, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples);
 			if (selection == null)
@@ -485,6 +501,7 @@ internal static class Program
         {
             Epsilon = featureBuilder.Epsilon,
             OutOfDistributionThreshold = oodThreshold,
+            ClassifierThreshold = 0.5,
             MinimumSeparationCm = 8,
             StrictProbability = 0.98,
             FeatureNames = featureBuilder.FeatureNames,
@@ -924,6 +941,197 @@ internal static class Program
         }
     }
 
+    private static void GenerateClassifierFigure(
+        string dataDir,
+        string outputDir,
+        double? durationOverride,
+        string? outPath,
+        string title,
+        int maxPoints,
+        double thresholdOverride,
+        string regime,
+        bool useGroupedSplit)
+    {
+        string configPath = Path.Combine(outputDir, "pipeline_config.json");
+        if (!File.Exists(configPath))
+        {
+            Console.WriteLine("pipeline_config.json not found in output directory; cannot render classifier figure.");
+            Environment.Exit(1);
+        }
+
+        var config = JsonSerializer.Deserialize<PipelineConfiguration>(File.ReadAllText(configPath))
+                     ?? throw new InvalidOperationException("Failed to deserialize pipeline_config.json");
+        var featureBuilder = new FeatureBuilder(config.Epsilon, config.DipolePositions);
+        var mlContext = new MLContext(seed: 42);
+
+        string classifierPath = Path.Combine(outputDir, "classifier.zip");
+        if (!File.Exists(classifierPath))
+        {
+            Console.WriteLine("classifier.zip not found in output directory; cannot render classifier figure.");
+            Environment.Exit(1);
+        }
+
+        using var classifierStream = File.OpenRead(classifierPath);
+        var classifier = mlContext.Model.Load(classifierStream, out _);
+
+        bool applyOodPass = regime.Equals("ood-pass", StringComparison.OrdinalIgnoreCase);
+        MahalanobisScorer? mahalanobis = null;
+        if (applyOodPass)
+        {
+            if (!TryLoadMahalanobis(Path.Combine(outputDir, "mahalanobis.json"), out mahalanobis))
+            {
+                Console.WriteLine("Mahalanobis model not found in artifacts; cannot apply ood-pass regime.");
+                Environment.Exit(1);
+            }
+        }
+
+        var singleRows = LoadSingleGroups(dataDir, durationOverride);
+        var dualRows = LoadDualGroups(dataDir, durationOverride);
+        var allRows = singleRows.Concat(dualRows).ToList();
+        if (allRows.Count == 0)
+        {
+            Console.WriteLine("No rows loaded for classifier evaluation. Check --data-dir.");
+            Environment.Exit(1);
+        }
+
+        IReadOnlyList<LocalizationRow> evalRows;
+        if (useGroupedSplit)
+        {
+            var grouped = Grouping.GroupSplit(allRows, 0.2, 42);
+            evalRows = grouped.Holdout;
+        }
+        else
+        {
+            var split = StratifiedThreeWaySplit(
+                allRows.Select(r => (Row: r, Example: BuildClassificationExample(featureBuilder, r))).ToList(),
+                calibrationFraction: 0.0,
+                testFraction: 0.2,
+                seed: 42);
+            evalRows = split.Test.Select(s => s.Row).ToList();
+        }
+
+        if (evalRows.Count == 0)
+        {
+            Console.WriteLine("Holdout split was empty; cannot generate classifier figure.");
+            Environment.Exit(1);
+        }
+
+        var predictionEngine = mlContext.Model.CreatePredictionEngine<ClassificationExample, ClassificationPrediction>(classifier);
+
+        int beforeGateCount = evalRows.Count;
+        var filteredSamples = new List<(double Probability, bool Label)>();
+        foreach (var row in evalRows)
+        {
+            var example = BuildClassificationExample(featureBuilder, row);
+            if (applyOodPass && mahalanobis != null)
+            {
+                double distance = mahalanobis.Score(ExtractOodVector(example.Features).Select(v => (double)v).ToArray());
+                if (distance > config.OutOfDistributionThreshold)
+                {
+                    continue;
+                }
+            }
+
+            double probability = predictionEngine.Predict(example).Probability;
+            filteredSamples.Add((probability, example.Label));
+        }
+
+        if (filteredSamples.Count == 0)
+        {
+            Console.WriteLine("No evaluation samples remained after filtering; cannot build classifier figure.");
+            Environment.Exit(1);
+        }
+
+        var samples = DownsampleSamples(filteredSamples, maxPoints);
+        double operatingThreshold = config.ClassifierThreshold ?? thresholdOverride;
+
+        const int steps = 200;
+        var rocPoints = new List<(double Fpr, double Tpr)>(steps + 1);
+        var prPoints = new List<(double Recall, double Precision)>(steps + 1);
+
+        for (int i = 0; i <= steps; i++)
+        {
+            double threshold = i / (double)steps;
+            var eval = EvaluateAt(samples, threshold);
+            rocPoints.Add((eval.Fpr, eval.Tpr));
+            prPoints.Add((eval.Recall, eval.Precision));
+        }
+
+        var operating = EvaluateAt(samples, operatingThreshold);
+
+        double auc = ComputeTrapezoidalAuc(rocPoints.Select(p => (p.Fpr, p.Tpr)).ToList());
+        double ap = ComputeTrapezoidalAuc(prPoints.Select(p => (p.Recall, p.Precision)).ToList());
+
+        string outputPath = outPath ?? Path.Combine(outputDir, "FigureC_classifier_roc_pr.png");
+        string subtitle = applyOodPass
+            ? $"N_before={beforeGateCount}, N_after={filteredSamples.Count}, OOD threshold={config.OutOfDistributionThreshold:F3}"
+            : $"N={filteredSamples.Count}";
+
+        ClassifierPerformanceFigureWriter.Write(
+            outputPath,
+            rocPoints,
+            prPoints,
+            (operating.Fpr, operating.Tpr),
+            (operating.Recall, operating.Precision),
+            auc,
+            ap,
+            operatingThreshold,
+            title,
+            subtitle);
+
+        double f1 = operating.Precision + operating.Recall <= 0
+            ? 0
+            : 2 * operating.Precision * operating.Recall / (operating.Precision + operating.Recall);
+
+        Console.WriteLine($"Classifier figure written to {outputPath}");
+        if (applyOodPass)
+        {
+            Console.WriteLine($"N_before={beforeGateCount}, N_after={filteredSamples.Count}, N_plotted={samples.Count}");
+        }
+        else
+        {
+            Console.WriteLine($"N_total={samples.Count}");
+        }
+
+        Console.WriteLine($"Operating threshold: {operatingThreshold:F3}");
+        Console.WriteLine($"Confusion matrix: TP={operating.Tp}, FP={operating.Fp}, TN={operating.Tn}, FN={operating.Fn}");
+        Console.WriteLine($"Precision={operating.Precision:F3}, Recall={operating.Recall:F3}, F1={f1:F3}");
+        Console.WriteLine($"AUC={auc:F3}, AP={ap:F3}");
+
+        static (double Fpr, double Tpr, double Precision, double Recall, int Tp, int Fp, int Tn, int Fn) EvaluateAt(
+            IReadOnlyList<(double Probability, bool Label)> samples,
+            double threshold)
+        {
+            int tp = 0, fp = 0, tn = 0, fn = 0;
+            foreach (var sample in samples)
+            {
+                bool predicted = sample.Probability >= threshold;
+                if (predicted && sample.Label)
+                {
+                    tp++;
+                }
+                else if (predicted && !sample.Label)
+                {
+                    fp++;
+                }
+                else if (!predicted && !sample.Label)
+                {
+                    tn++;
+                }
+                else if (!predicted && sample.Label)
+                {
+                    fn++;
+                }
+            }
+
+            double tpr = tp + fn == 0 ? 0 : (double)tp / (tp + fn);
+            double fpr = fp + tn == 0 ? 0 : (double)fp / (fp + tn);
+            double precision = tp + fp == 0 ? 1.0 : (double)tp / (tp + fp);
+            double recall = tp + fn == 0 ? 0 : (double)tp / (tp + fn);
+            return (fpr, tpr, precision, recall, tp, fp, tn, fn);
+        }
+    }
+
     private static bool TryLoadMahalanobis(string path, out MahalanobisScorer scorer)
     {
         scorer = new MahalanobisScorer(new double[4], Matrix4x4.Identity);
@@ -964,6 +1172,43 @@ internal static class Program
         }
 
         return downsampled;
+    }
+
+    private static List<(double Probability, bool Label)> DownsampleSamples(IReadOnlyList<(double Probability, bool Label)> samples, int maxPoints)
+    {
+        if (samples.Count <= maxPoints)
+        {
+            return samples.ToList();
+        }
+
+        var ordered = samples.OrderBy(s => s.Probability).ToList();
+        int step = (int)Math.Ceiling((double)ordered.Count / maxPoints);
+        var result = new List<(double Probability, bool Label)>();
+        for (int i = 0; i < ordered.Count; i += step)
+        {
+            result.Add(ordered[i]);
+        }
+
+        return result;
+    }
+
+    private static double ComputeTrapezoidalAuc(IReadOnlyList<(double X, double Y)> points)
+    {
+        if (points.Count < 2)
+        {
+            return 0;
+        }
+
+        var ordered = points.OrderBy(p => p.X).ToList();
+        double auc = 0;
+        for (int i = 1; i < ordered.Count; i++)
+        {
+            double dx = ordered[i].X - ordered[i - 1].X;
+            double avgY = 0.5 * (ordered[i].Y + ordered[i - 1].Y);
+            auc += dx * avgY;
+        }
+
+        return auc;
     }
 
     private static List<OodSample> BuildOodSamples(IReadOnlyList<LocalizationRow> holdoutRows, FeatureBuilder featureBuilder, MahalanobisScorer mahalanobis, double faultFraction, int seed)
@@ -2409,7 +2654,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2450,6 +2695,12 @@ internal static class Program
         string oodFigThresholdMode = "artifact";
         double oodFigThresholdK = 3.0;
         string oodFigRegime = "both";
+        bool emitClassifierFigure = false;
+        string? clfFigOutPath = null;
+        string clfFigTitle = "Single vs dual hypothesis selection";
+        int clfFigMaxPoints = 5000;
+        double clfFigThreshold = 0.5;
+        string clfFigRegime = "all";
 
         foreach (var arg in args)
         {
@@ -2609,6 +2860,30 @@ internal static class Program
             {
                 oodFigRegime = arg.Substring("--oodfig-regime=".Length);
             }
+            else if (arg.StartsWith("--emit-classifier-figure="))
+            {
+                emitClassifierFigure = bool.Parse(arg.Substring("--emit-classifier-figure=".Length));
+            }
+            else if (arg.StartsWith("--clf-fig-out="))
+            {
+                clfFigOutPath = arg.Substring("--clf-fig-out=".Length);
+            }
+            else if (arg.StartsWith("--clf-fig-title="))
+            {
+                clfFigTitle = arg.Substring("--clf-fig-title=".Length);
+            }
+            else if (arg.StartsWith("--clf-fig-max-points="))
+            {
+                clfFigMaxPoints = int.Parse(arg.Substring("--clf-fig-max-points=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--clf-fig-threshold="))
+            {
+                clfFigThreshold = double.Parse(arg.Substring("--clf-fig-threshold=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--clf-fig-regime="))
+            {
+                clfFigRegime = arg.Substring("--clf-fig-regime=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
@@ -2664,7 +2939,23 @@ internal static class Program
             throw new ArgumentException("--oodfig-regime must be one of 'single', 'dual', or 'both'");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime);
+        if (clfFigMaxPoints <= 0)
+        {
+            throw new ArgumentException("--clf-fig-max-points must be positive");
+        }
+
+        if (clfFigThreshold is < 0 or > 1)
+        {
+            throw new ArgumentException("--clf-fig-threshold must be between 0 and 1");
+        }
+
+        if (!string.Equals(clfFigRegime, "all", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(clfFigRegime, "ood-pass", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--clf-fig-regime must be one of 'all' or 'ood-pass'");
+        }
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
