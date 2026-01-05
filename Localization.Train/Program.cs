@@ -58,9 +58,14 @@ internal static class Program
         private double Fraction(int count) => Total == 0 ? double.NaN : (double)count / Total;
     }
 
+    private sealed record NormalizationSelection(LocalizationRow Low, LocalizationRow High, (double X, double Y, double Z) Position, (int X, int Y, int Z) RoundedKey, double LowTotal, double HighTotal)
+    {
+        public double Ratio => HighTotal / LowTotal;
+    }
+
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitFeatureSchemaTex)
@@ -70,6 +75,30 @@ internal static class Program
             string tex = FeatureSchemaTexWriter.BuildRawFeatureSchemaTableTex(builder, texCaption, texLabel);
             FeatureSchemaTexWriter.WriteTo(outputPath, tex);
             Console.WriteLine($"Feature schema LaTeX written to {outputPath}");
+            return;
+        }
+
+        if (emitNormalizationFigure)
+        {
+            var singleRows = LoadSingleGroups(dataDir, durationOverride);
+            var dualRows = LoadDualGroups(dataDir, durationOverride);
+
+            var selection = FindNormalizationExamples(singleRows, dualRows, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples);
+            if (selection == null)
+            {
+                Console.WriteLine($"Warning: no position found with at least two rows and high/low ratio >= {normFigMinCountRatio:F2}.");
+                Environment.Exit(1);
+            }
+
+            string outputPath = normFigOutPath ?? Path.Combine(outputDir, "normalization_effect.png");
+            string subtitle = $"Pos (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2} | high/low={selection.Ratio:F2}x";
+            NormalizationEffectFigureWriter.Write(outputPath, selection.Low, selection.High, normFigTitle, subtitle);
+
+            Console.WriteLine($"Normalization figure written to {outputPath}");
+            Console.WriteLine($"Regime: {normFigRegime}");
+            Console.WriteLine($"Rounded position key (cm, round={normFigRoundCm:F2}): x={selection.RoundedKey.X * normFigRoundCm:F2}, y={selection.RoundedKey.Y * normFigRoundCm:F2}, z={selection.RoundedKey.Z * normFigRoundCm:F2}");
+            Console.WriteLine($"Selected position (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2}");
+            Console.WriteLine($"Low total={selection.LowTotal:F0}, High total={selection.HighTotal:F0}, ratio={selection.Ratio:F2}x");
             return;
         }
 
@@ -1998,7 +2027,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2015,6 +2044,13 @@ internal static class Program
         string? texOutPath = null;
         string texCaption = "Raw feature schema derived from sliding analysis windows.";
         string texLabel = "tab:raw_feature_schema";
+        bool emitNormalizationFigure = false;
+        string? normFigOutPath = null;
+        string normFigRegime = "single";
+        double normFigRoundCm = 1.0;
+        double normFigMinCountRatio = 2.0;
+        int normFigMaxExamples = 2;
+        string normFigTitle = "Effect of normalization at identical source position";
 
         foreach (var arg in args)
         {
@@ -2078,12 +2114,55 @@ internal static class Program
             {
                 texLabel = arg.Substring("--tex-label=".Length);
             }
+            else if (arg.StartsWith("--emit-normalization-figure="))
+            {
+                emitNormalizationFigure = bool.Parse(arg.Substring("--emit-normalization-figure=".Length));
+            }
+            else if (arg.StartsWith("--normfig-out="))
+            {
+                normFigOutPath = arg.Substring("--normfig-out=".Length);
+            }
+            else if (arg.StartsWith("--normfig-regime="))
+            {
+                normFigRegime = arg.Substring("--normfig-regime=".Length);
+            }
+            else if (arg.StartsWith("--normfig-position-round-cm="))
+            {
+                normFigRoundCm = double.Parse(arg.Substring("--normfig-position-round-cm=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--normfig-min-count-ratio="))
+            {
+                normFigMinCountRatio = double.Parse(arg.Substring("--normfig-min-count-ratio=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--normfig-max-examples="))
+            {
+                normFigMaxExamples = int.Parse(arg.Substring("--normfig-max-examples=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--normfig-title="))
+            {
+                normFigTitle = arg.Substring("--normfig-title=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
         runLabelShuffleControl |= runNegativeControls;
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel);
+        if (!string.Equals(normFigRegime, "single", StringComparison.OrdinalIgnoreCase) && !string.Equals(normFigRegime, "dual", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--normfig-regime must be either 'single' or 'dual'");
+        }
+
+        if (normFigRoundCm <= 0)
+        {
+            throw new ArgumentException("--normfig-position-round-cm must be positive");
+        }
+
+        if (normFigMaxExamples < 2)
+        {
+            throw new ArgumentException("--normfig-max-examples must be at least 2");
+        }
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
@@ -2144,6 +2223,84 @@ internal static class Program
         }
 
         return list;
+    }
+
+    private static NormalizationSelection? FindNormalizationExamples(IReadOnlyList<LocalizationRow> singleRows, IReadOnlyList<LocalizationRow> dualRows, string normFigRegime, double normFigRoundCm, double normFigMinCountRatio, int normFigMaxExamples)
+    {
+        if (normFigRoundCm <= 0)
+        {
+            throw new ArgumentException("Rounding increment must be positive", nameof(normFigRoundCm));
+        }
+
+        bool isDualRegime = string.Equals(normFigRegime, "dual", StringComparison.OrdinalIgnoreCase);
+
+        var candidates = isDualRegime
+            ? dualRows.Where(r => r.IsDual && r.DualCoordinates?.Length == 6).ToList()
+            : singleRows.Where(r => !r.IsDual && r.SingleCoordinates?.Length == 3).ToList();
+
+        var indexed = candidates.Select((row, index) =>
+        {
+            var position = isDualRegime
+                ? GetCentroid(row.DualCoordinates!)
+                : GetSinglePosition(row.SingleCoordinates!);
+            var rounded = RoundPosition(position, normFigRoundCm);
+            double total = row.Channels.Sum();
+            return new { Row = row, Index = index, Position = position, Rounded = rounded, Total = total };
+        }).ToList();
+
+        var groups = indexed
+            .GroupBy(i => i.Rounded)
+            .OrderBy(g => g.Key.Item1)
+            .ThenBy(g => g.Key.Item2)
+            .ThenBy(g => g.Key.Item3);
+
+        foreach (var group in groups)
+        {
+            if (group.Count() < 2)
+            {
+                continue;
+            }
+
+            var ordered = group.OrderBy(g => g.Total).ThenBy(g => g.Index).ToList();
+            var low = ordered.First();
+            var high = ordered.Last();
+
+            if (low.Total <= 0)
+            {
+                continue;
+            }
+
+            double ratio = high.Total / low.Total;
+            if (ratio < normFigMinCountRatio)
+            {
+                continue;
+            }
+
+            return new NormalizationSelection(low.Row, high.Row, low.Position, group.Key, low.Total, high.Total);
+        }
+
+        return null;
+    }
+
+    private static (double X, double Y, double Z) GetSinglePosition(IReadOnlyList<double> coords)
+    {
+        return (coords[0], coords[1], coords[2]);
+    }
+
+    private static (double X, double Y, double Z) GetCentroid(IReadOnlyList<double> coords)
+    {
+        double x = 0.5 * (coords[0] + coords[3]);
+        double y = 0.5 * (coords[1] + coords[4]);
+        double z = 0.5 * (coords[2] + coords[5]);
+        return (x, y, z);
+    }
+
+    private static (int X, int Y, int Z) RoundPosition((double X, double Y, double Z) position, double roundCm)
+    {
+        int x = (int)Math.Round(position.X / roundCm, MidpointRounding.AwayFromZero);
+        int y = (int)Math.Round(position.Y / roundCm, MidpointRounding.AwayFromZero);
+        int z = (int)Math.Round(position.Z / roundCm, MidpointRounding.AwayFromZero);
+        return (x, y, z);
     }
 
     private static List<string> FindFilesByPrefix(string dataDir, string prefix)
