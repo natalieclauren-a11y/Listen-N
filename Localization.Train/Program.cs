@@ -2505,26 +2505,6 @@ internal static class Program
         return new LocalizationErrorSummary { Count = errors.Count, Mean = mean, Median = median, Rmse = rmse };
     }
 
-    private static double Percentile(IReadOnlyList<double> sorted, double percentile)
-    {
-        if (sorted.Count == 0)
-        {
-            return double.NaN;
-        }
-
-        double position = (sorted.Count - 1) * percentile;
-        int lowerIndex = (int)Math.Floor(position);
-        int upperIndex = (int)Math.Ceiling(position);
-
-        if (upperIndex >= sorted.Count)
-        {
-            return sorted[^1];
-        }
-
-        double weight = position - lowerIndex;
-        return sorted[lowerIndex] * (1 - weight) + sorted[upperIndex] * weight;
-    }
-
     private static (List<ErrorDiagnosticPoint> ByDistance, List<ErrorDiagnosticPoint> ByCounts) BuildErrorDiagnosticPoints(
         LocalizationPipeline pipeline,
         IReadOnlyList<LocalizationRow> rows,
