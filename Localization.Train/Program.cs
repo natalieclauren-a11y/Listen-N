@@ -163,6 +163,29 @@ internal static class Program
             Console.WriteLine($"Bins={descFigBins}");
             return;
         }
+      if (emitNormalizationFigure)
+		{
+			var singleRowsForNorm = LoadSingleGroups(dataDir, durationOverride);
+			var dualRowsForNorm = LoadDualGroups(dataDir, durationOverride);
+		
+			var selection = FindNormalizationExamples(singleRowsForNorm, dualRowsForNorm, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples);
+			if (selection == null)
+			{
+				Console.WriteLine($"Warning: no position found with at least two rows and high/low ratio >= {normFigMinCountRatio:F2}.");
+				Environment.Exit(1);
+			}
+		
+			string outputPath = normFigOutPath ?? Path.Combine(outputDir, "normalization_effect.png");
+			string subtitle = $"Pos (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2} | high/low={selection.Ratio:F2}x";
+			NormalizationEffectFigureWriter.Write(outputPath, selection.Low, selection.High, normFigTitle, subtitle);
+		
+			Console.WriteLine($"Normalization figure written to {outputPath}");
+			Console.WriteLine($"Regime: {normFigRegime}");
+			Console.WriteLine($"Rounded position key (cm, round={normFigRoundCm:F2}): x={selection.RoundedKey.X * normFigRoundCm:F2}, y={selection.RoundedKey.Y * normFigRoundCm:F2}, z={selection.RoundedKey.Z * normFigRoundCm:F2}");
+			Console.WriteLine($"Selected position (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2}");
+			Console.WriteLine($"Low total={selection.LowTotal:F0}, High total={selection.HighTotal:F0}, ratio={selection.Ratio:F2}x");
+			return;
+		}
 
 
         var trainer = new ModelTrainer();
