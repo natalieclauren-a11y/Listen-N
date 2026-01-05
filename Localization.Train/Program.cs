@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Text.Json;
 using Microsoft.ML;
 using Microsoft.ML.Data;
@@ -78,7 +79,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitLockedSchemaTex)
@@ -212,9 +213,25 @@ internal static class Program
             Console.WriteLine($"Bins={descFigBins}");
             return;
         }
+        if (emitOodFigure)
+        {
+            GenerateOodMahalanobisFigure(
+                dataDir,
+                outputDir,
+                durationOverride,
+                oodFigOutPath,
+                oodFigTitle,
+                oodFigBins,
+                oodFigMaxPoints,
+                oodFigThresholdMode,
+                oodFigThresholdK,
+                oodFigRegime,
+                useGroupedSplit);
+            return;
+        }
       if (emitNormalizationFigure)
-		{
-			var singleRowsForNorm = LoadSingleGroups(dataDir, durationOverride);
+                {
+                        var singleRowsForNorm = LoadSingleGroups(dataDir, durationOverride);
 			var dualRowsForNorm = LoadDualGroups(dataDir, durationOverride);
 		
 			var selection = FindNormalizationExamples(singleRowsForNorm, dualRowsForNorm, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples);
@@ -717,6 +734,236 @@ internal static class Program
             features[offset + 2],
             features[offset + 3]
         };
+    }
+
+    private static void GenerateOodMahalanobisFigure(
+        string dataDir,
+        string outputDir,
+        double? durationOverride,
+        string? outPath,
+        string oodFigTitle,
+        int bins,
+        int maxPoints,
+        string thresholdMode,
+        double thresholdK,
+        string regime,
+        bool useGroupedSplit)
+    {
+        var singleRows = LoadSingleGroups(dataDir, durationOverride);
+        var dualRows = LoadDualGroups(dataDir, durationOverride);
+
+        var filteredRows = regime.Equals("single", StringComparison.OrdinalIgnoreCase)
+            ? singleRows
+            : regime.Equals("dual", StringComparison.OrdinalIgnoreCase)
+                ? dualRows
+                : singleRows.Concat(dualRows).ToList();
+
+        if (filteredRows.Count == 0)
+        {
+            Console.WriteLine("No rows available for the requested regime; cannot generate OOD figure.");
+            Environment.Exit(1);
+        }
+
+        var split = useGroupedSplit
+            ? Grouping.GroupSplit(filteredRows, 0.2, 42)
+            : Grouping.GroupSplit(filteredRows, 0.2, 42);
+
+        var trainRows = split.Train;
+        var evalRows = split.Holdout;
+
+        var trainer = new ModelTrainer();
+        var mlContext = trainer.MlContext;
+        FeatureBuilder featureBuilder = trainer.FeatureBuilder;
+
+        MahalanobisScorer? mahalanobis = null;
+        double threshold = double.NaN;
+        bool usedArtifacts = false;
+        string thresholdSource = "fit";
+        RegressionModelGroup? singleRegressor = null;
+        RegressionModelGroup? dualRegressor = null;
+        PipelineConfiguration? artifactConfig = null;
+
+        if (thresholdMode.Equals("artifact", StringComparison.OrdinalIgnoreCase))
+        {
+            string configPath = Path.Combine(outputDir, "pipeline_config.json");
+            if (!File.Exists(configPath))
+            {
+                Console.WriteLine("pipeline_config.json not found in output directory; falling back to threshold-mode=fit.");
+            }
+            else
+            {
+                artifactConfig = JsonSerializer.Deserialize<PipelineConfiguration>(File.ReadAllText(configPath));
+                if (artifactConfig != null)
+                {
+                    featureBuilder = new FeatureBuilder(artifactConfig.Epsilon, artifactConfig.DipolePositions);
+                    threshold = artifactConfig.OutOfDistributionThreshold;
+                    singleRegressor = RegressionModelGroup.Load(mlContext, Path.Combine(outputDir, "single_regressor"));
+                    dualRegressor = RegressionModelGroup.Load(mlContext, Path.Combine(outputDir, "dual_regressor"));
+
+                    if (!TryLoadMahalanobis(Path.Combine(outputDir, "mahalanobis.json"), out mahalanobis))
+                    {
+                        Console.WriteLine("Mahalanobis model not found in artifacts; falling back to threshold-mode=fit.");
+                        thresholdMode = "fit";
+                    }
+                    else
+                    {
+                        usedArtifacts = true;
+                        thresholdSource = "artifact";
+                    }
+                }
+            }
+        }
+
+        if (!usedArtifacts)
+        {
+            var oodVectors = trainRows
+                .Select(row => ExtractOodVector(featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray())
+                    .Select(v => (double)v)
+                    .ToArray())
+                .ToList();
+
+            if (oodVectors.Count == 0)
+            {
+                Console.WriteLine("Warning: no training rows available to fit Mahalanobis; using identity fallback.");
+                mahalanobis = new MahalanobisScorer(new double[4], Matrix4x4.Identity);
+                threshold = thresholdK;
+            }
+            else
+            {
+                mahalanobis = MahalanobisScorer.FromSamples(oodVectors);
+
+                var trainDistancesForThreshold = oodVectors.Select(v => mahalanobis.Score(v)).ToList();
+                double mean = trainDistancesForThreshold.Average();
+                double std = Math.Sqrt(trainDistancesForThreshold.Average(d => Math.Pow(d - mean, 2)));
+                threshold = mean + thresholdK * std;
+            }
+
+            var singleTrainRows = trainRows.Where(r => !r.IsDual).ToList();
+            var dualTrainRows = trainRows.Where(r => r.IsDual).ToList();
+
+            singleRegressor = singleTrainRows.Count == 0
+                ? TrainFallbackRegressor(trainer, featureBuilder, durationOverride, new[] { "x", "y", "z" })
+                : trainer.TrainMultiRegressor(
+                    singleTrainRows.Select(r => featureBuilder.BuildFeatures(r.Channels, r.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray()).ToList(),
+                    singleTrainRows.Select(r => r.SingleCoordinates ?? new double[3]).ToList(),
+                    new[] { "x", "y", "z" });
+
+            dualRegressor = dualTrainRows.Count == 0
+                ? TrainFallbackRegressor(trainer, featureBuilder, durationOverride, new[] { "x1", "y1", "z1", "x2", "y2", "z2" })
+                : trainer.TrainMultiRegressor(
+                    dualTrainRows.Select(r => featureBuilder.BuildFeatures(r.Channels, r.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray()).ToList(),
+                    dualTrainRows.Select(r => r.DualCoordinates ?? new double[6]).ToList(),
+                    new[] { "x1", "y1", "z1", "x2", "y2", "z2" });
+        }
+
+        var trainDistances = trainRows
+            .Select(row => ScoreMahalanobis(row))
+            .ToList();
+
+        var evalDistances = new List<double>();
+        var evalPoints = new List<(double Distance, double ErrorCm)>();
+
+        foreach (var row in evalRows)
+        {
+            double distance = ScoreMahalanobis(row);
+            evalDistances.Add(distance);
+
+            double error = ComputeLocalizationError(row, distance);
+            if (!double.IsNaN(error))
+            {
+                evalPoints.Add((distance, error));
+            }
+        }
+
+        evalPoints = Downsample(evalPoints, maxPoints);
+
+        string outputPath = outPath ?? Path.Combine(outputDir, "FigureB_ood_mahalanobis.png");
+        string subtitle = $"N_eval={evalDistances.Count}, threshold={threshold:F3}";
+
+        OodMahalanobisFigureWriter.Write(
+            outputPath,
+            trainDistances,
+            evalDistances,
+            evalPoints,
+            threshold,
+            bins,
+            oodFigTitle,
+            subtitle);
+
+        Console.WriteLine($"OOD figure written to {outputPath}");
+        Console.WriteLine($"Threshold ({thresholdSource}) = {threshold:F4}");
+        if (artifactConfig?.SchemaHash is { Length: > 0 })
+        {
+            Console.WriteLine($"Schema hash: {artifactConfig.SchemaHash}");
+        }
+        Console.WriteLine($"N_train={trainDistances.Count}, N_eval={evalDistances.Count}, N_scatter_plotted={evalPoints.Count}");
+
+        double ScoreMahalanobis(LocalizationRow row)
+        {
+            var features = featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray();
+            var vector = ExtractOodVector(features).Select(v => (double)v).ToArray();
+            return mahalanobis!.Score(vector);
+        }
+
+        double ComputeLocalizationError(LocalizationRow row, double distance)
+        {
+            if (!row.IsDual && row.SingleCoordinates is { Length: 3 } singleTruth)
+            {
+                var pred = singleRegressor!.Predict(featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray());
+                return Euclidean(pred.Take(3).ToArray(), singleTruth);
+            }
+
+            if (row.IsDual && row.DualCoordinates is { Length: 6 } dualTruth)
+            {
+                var pred = dualRegressor!.Predict(featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray());
+                var errors = AssignmentAwareErrors(pred, dualTruth);
+                return 0.5 * (errors.First + errors.Second);
+            }
+
+            return double.NaN;
+        }
+    }
+
+    private static bool TryLoadMahalanobis(string path, out MahalanobisScorer scorer)
+    {
+        scorer = new MahalanobisScorer(new double[4], Matrix4x4.Identity);
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        var model = JsonSerializer.Deserialize<MahalanobisModel>(File.ReadAllText(path));
+        if (model?.InverseCovariance is not { Count: 4 })
+        {
+            return false;
+        }
+
+        var inv = new Matrix4x4(
+            (float)model.InverseCovariance[0][0], (float)model.InverseCovariance[0][1], (float)model.InverseCovariance[0][2], (float)model.InverseCovariance[0][3],
+            (float)model.InverseCovariance[1][0], (float)model.InverseCovariance[1][1], (float)model.InverseCovariance[1][2], (float)model.InverseCovariance[1][3],
+            (float)model.InverseCovariance[2][0], (float)model.InverseCovariance[2][1], (float)model.InverseCovariance[2][2], (float)model.InverseCovariance[2][3],
+            (float)model.InverseCovariance[3][0], (float)model.InverseCovariance[3][1], (float)model.InverseCovariance[3][2], (float)model.InverseCovariance[3][3]);
+
+        scorer = new MahalanobisScorer(model.Mean, inv);
+        return true;
+    }
+
+    private static List<(double Distance, double ErrorCm)> Downsample(IReadOnlyList<(double Distance, double ErrorCm)> points, int maxPoints)
+    {
+        if (points.Count <= maxPoints)
+        {
+            return points.ToList();
+        }
+
+        var ordered = points.OrderBy(p => p.Distance).ToList();
+        int step = (int)Math.Ceiling((double)ordered.Count / maxPoints);
+        var downsampled = new List<(double Distance, double ErrorCm)>();
+        for (int i = 0; i < ordered.Count; i += step)
+        {
+            downsampled.Add(ordered[i]);
+        }
+
+        return downsampled;
     }
 
     private static List<OodSample> BuildOodSamples(IReadOnlyList<LocalizationRow> holdoutRows, FeatureBuilder featureBuilder, MahalanobisScorer mahalanobis, double faultFraction, int seed)
@@ -2162,7 +2409,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2195,6 +2442,14 @@ internal static class Program
         int descFigBins = 30;
         string descFigRegime = "all";
         string descFigTitle = "Distributional descriptors from normalized channel responses";
+        bool emitOodFigure = false;
+        string? oodFigOutPath = null;
+        string oodFigTitle = "Out-of-distribution detection using Mahalanobis distance";
+        int oodFigBins = 40;
+        int oodFigMaxPoints = 5000;
+        string oodFigThresholdMode = "artifact";
+        double oodFigThresholdK = 3.0;
+        string oodFigRegime = "both";
 
         foreach (var arg in args)
         {
@@ -2322,6 +2577,38 @@ internal static class Program
             {
                 descFigTitle = arg.Substring("--descfig-title=".Length);
             }
+            else if (arg.StartsWith("--emit-ood-figure="))
+            {
+                emitOodFigure = bool.Parse(arg.Substring("--emit-ood-figure=".Length));
+            }
+            else if (arg.StartsWith("--oodfig-out="))
+            {
+                oodFigOutPath = arg.Substring("--oodfig-out=".Length);
+            }
+            else if (arg.StartsWith("--oodfig-title="))
+            {
+                oodFigTitle = arg.Substring("--oodfig-title=".Length);
+            }
+            else if (arg.StartsWith("--oodfig-bins="))
+            {
+                oodFigBins = int.Parse(arg.Substring("--oodfig-bins=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--oodfig-max-points="))
+            {
+                oodFigMaxPoints = int.Parse(arg.Substring("--oodfig-max-points=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--oodfig-threshold-mode="))
+            {
+                oodFigThresholdMode = arg.Substring("--oodfig-threshold-mode=".Length);
+            }
+            else if (arg.StartsWith("--oodfig-threshold-k="))
+            {
+                oodFigThresholdK = double.Parse(arg.Substring("--oodfig-threshold-k=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--oodfig-regime="))
+            {
+                oodFigRegime = arg.Substring("--oodfig-regime=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
@@ -2354,7 +2641,30 @@ internal static class Program
             throw new ArgumentException("--descfig-bins must be positive");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle);
+        if (!string.Equals(oodFigThresholdMode, "artifact", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(oodFigThresholdMode, "fit", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--oodfig-threshold-mode must be one of 'artifact' or 'fit'");
+        }
+
+        if (oodFigBins <= 0)
+        {
+            throw new ArgumentException("--oodfig-bins must be positive");
+        }
+
+        if (oodFigMaxPoints <= 0)
+        {
+            throw new ArgumentException("--oodfig-max-points must be positive");
+        }
+
+        if (!string.Equals(oodFigRegime, "single", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(oodFigRegime, "dual", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(oodFigRegime, "both", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--oodfig-regime must be one of 'single', 'dual', or 'both'");
+        }
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
