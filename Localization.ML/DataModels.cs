@@ -108,6 +108,7 @@ public sealed class PipelineConfiguration
 {
     public double Epsilon { get; set; }
     public double OutOfDistributionThreshold { get; set; }
+    public double? ClassifierThreshold { get; set; }
     public double MinimumSeparationCm { get; set; }
     public double StrictProbability { get; set; }
     public string SchemaVersion { get; set; } = string.Empty;
