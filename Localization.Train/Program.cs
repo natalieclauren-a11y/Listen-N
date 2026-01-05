@@ -63,6 +63,19 @@ internal static class Program
         public double Ratio => HighTotal / LowTotal;
     }
 
+    private static int IndexOf(IReadOnlyList<string> list, string value)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (string.Equals(list[i], value, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     public static void Main(string[] args)
     {
         var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle) = ParseArgs(args);
@@ -71,14 +84,8 @@ internal static class Program
         if (emitLockedSchemaTex)
         {
             var builder = new FeatureBuilder();
-            string outputPath = lockedTexOutPath ?? Path.Combine(outputDir, "locked_feature_schema.tex");
-            string tex = LockedSchemaTexWriter.BuildLockedFeatureSchemaTableTex(builder, lockedTexCaption, lockedTexLabel);
-            LockedSchemaTexWriter.WriteTo(outputPath, tex);
 
-            Console.WriteLine($"Locked schema LaTeX written to {outputPath}");
-            Console.WriteLine($"Feature count: {builder.FeatureNames.Count}");
-
-            var config = new PipelineConfiguration
+            var lockedConfig = new PipelineConfiguration
             {
                 Epsilon = builder.Epsilon,
                 OutOfDistributionThreshold = 0,
@@ -91,8 +98,22 @@ internal static class Program
                 RegressorTrainers = new[] { "FastForestRegression", "FastForestRegression" }
             };
 
-            var schemaStamp = SchemaStampBuilder.Build(config, builder, config.ClassifierTrainer!, config.RegressorTrainers!);
-            Console.WriteLine($"Schema hash: {SchemaStampBuilder.ComputeHash(schemaStamp)}");
+            var lockedSchemaStamp = SchemaStampBuilder.Build(
+                lockedConfig,
+                builder,
+                lockedConfig.ClassifierTrainer!,
+                lockedConfig.RegressorTrainers!);
+
+            lockedConfig.SchemaVersion = SchemaStampBuilder.DefaultSchemaVersion;
+            lockedConfig.SchemaHash = SchemaStampBuilder.ComputeHash(lockedSchemaStamp);
+
+            string outputPath = lockedTexOutPath ?? Path.Combine(outputDir, "locked_feature_schema.tex");
+            string tex = LockedSchemaTexWriter.BuildLockedFeatureSchemaTableTex(builder, lockedTexCaption, lockedTexLabel);
+            LockedSchemaTexWriter.WriteTo(outputPath, tex);
+
+            Console.WriteLine($"Locked schema LaTeX written to {outputPath}");
+            Console.WriteLine($"SchemaVersion={lockedConfig.SchemaVersion}, SchemaHash={lockedConfig.SchemaHash}");
+            Console.WriteLine($"Feature count: {builder.FeatureNames.Count}");
             return;
         }
 
@@ -133,10 +154,10 @@ internal static class Program
         if (emitDescriptorFigure)
         {
             var builder = new FeatureBuilder();
-            int entropyIdx = builder.FeatureNames.IndexOf("Entropy");
-            int giniIdx = builder.FeatureNames.IndexOf("Gini");
-            int anisIdx = builder.FeatureNames.IndexOf("Anisotropy");
-            int dipoleIdx = builder.FeatureNames.IndexOf("DipoleMagnitude");
+            int entropyIdx = IndexOf(builder.FeatureNames, "Entropy");
+            int giniIdx = IndexOf(builder.FeatureNames, "Gini");
+            int anisIdx = IndexOf(builder.FeatureNames, "Anisotropy");
+            int dipoleIdx = IndexOf(builder.FeatureNames, "DipoleMagnitude");
 
             if (entropyIdx < 0 || giniIdx < 0 || anisIdx < 0 || dipoleIdx < 0)
             {
