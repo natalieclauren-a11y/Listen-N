@@ -65,7 +65,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitFeatureSchemaTex)
@@ -78,29 +78,91 @@ internal static class Program
             return;
         }
 
-      if (emitNormalizationFigure)
-{
-    var singleRowsForNorm = LoadSingleGroups(dataDir, durationOverride);
-    var dualRowsForNorm = LoadDualGroups(dataDir, durationOverride);
+        if (emitNormalizationFigure)
+        {
+            var singleRowsForNorm = LoadSingleGroups(dataDir, durationOverride);
+            var dualRowsForNorm = LoadDualGroups(dataDir, durationOverride);
 
-    var selection = FindNormalizationExamples(singleRowsForNorm, dualRowsForNorm, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples);
-    if (selection == null)
-    {
-        Console.WriteLine($"Warning: no position found with at least two rows and high/low ratio >= {normFigMinCountRatio:F2}.");
-        Environment.Exit(1);
-    }
+            var selection = FindNormalizationExamples(singleRowsForNorm, dualRowsForNorm, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples);
+            if (selection == null)
+            {
+                Console.WriteLine($"Warning: no position found with at least two rows and high/low ratio >= {normFigMinCountRatio:F2}.");
+                Environment.Exit(1);
+            }
 
-    string outputPath = normFigOutPath ?? Path.Combine(outputDir, "normalization_effect.png");
-    string subtitle = $"Pos (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2} | high/low={selection.Ratio:F2}x";
-    NormalizationEffectFigureWriter.Write(outputPath, selection.Low, selection.High, normFigTitle, subtitle);
+            string outputPath = normFigOutPath ?? Path.Combine(outputDir, "normalization_effect.png");
+            string subtitle = $"Pos (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2} | high/low={selection.Ratio:F2}x";
+            NormalizationEffectFigureWriter.Write(outputPath, selection.Low, selection.High, normFigTitle, subtitle);
 
-    Console.WriteLine($"Normalization figure written to {outputPath}");
-    Console.WriteLine($"Regime: {normFigRegime}");
-    Console.WriteLine($"Rounded position key (cm, round={normFigRoundCm:F2}): x={selection.RoundedKey.X * normFigRoundCm:F2}, y={selection.RoundedKey.Y * normFigRoundCm:F2}, z={selection.RoundedKey.Z * normFigRoundCm:F2}");
-    Console.WriteLine($"Selected position (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2}");
-    Console.WriteLine($"Low total={selection.LowTotal:F0}, High total={selection.HighTotal:F0}, ratio={selection.Ratio:F2}x");
-    return;
-}
+            Console.WriteLine($"Normalization figure written to {outputPath}");
+            Console.WriteLine($"Regime: {normFigRegime}");
+            Console.WriteLine($"Rounded position key (cm, round={normFigRoundCm:F2}): x={selection.RoundedKey.X * normFigRoundCm:F2}, y={selection.RoundedKey.Y * normFigRoundCm:F2}, z={selection.RoundedKey.Z * normFigRoundCm:F2}");
+            Console.WriteLine($"Selected position (cm): x={selection.Position.X:F2}, y={selection.Position.Y:F2}, z={selection.Position.Z:F2}");
+            Console.WriteLine($"Low total={selection.LowTotal:F0}, High total={selection.HighTotal:F0}, ratio={selection.Ratio:F2}x");
+            return;
+        }
+
+        if (emitDescriptorFigure)
+        {
+            var builder = new FeatureBuilder();
+            int entropyIdx = builder.FeatureNames.IndexOf("Entropy");
+            int giniIdx = builder.FeatureNames.IndexOf("Gini");
+            int anisIdx = builder.FeatureNames.IndexOf("Anisotropy");
+            int dipoleIdx = builder.FeatureNames.IndexOf("DipoleMagnitude");
+
+            if (entropyIdx < 0 || giniIdx < 0 || anisIdx < 0 || dipoleIdx < 0)
+            {
+                throw new InvalidOperationException("One or more descriptor features (Entropy, Gini, Anisotropy, DipoleMagnitude) were not found in FeatureNames.");
+            }
+
+            var singleRowsForDesc = LoadSingleGroups(dataDir, durationOverride);
+            var dualRowsForDesc = LoadDualGroups(dataDir, durationOverride);
+
+            var filteredSingle = descFigRegime.Equals("dual", StringComparison.OrdinalIgnoreCase) ? new List<LocalizationRow>() : singleRowsForDesc;
+            var filteredDual = descFigRegime.Equals("single", StringComparison.OrdinalIgnoreCase) ? new List<LocalizationRow>() : dualRowsForDesc;
+
+            var entropySingle = new List<double>();
+            var entropyDual = new List<double>();
+            var giniSingle = new List<double>();
+            var giniDual = new List<double>();
+            var anisSingle = new List<double>();
+            var anisDual = new List<double>();
+            var dipoleSingle = new List<double>();
+            var dipoleDual = new List<double>();
+
+            void AddDescriptors(IEnumerable<LocalizationRow> rows, List<double> entropyDest, List<double> giniDest, List<double> anisDest, List<double> dipoleDest)
+            {
+                foreach (var row in rows)
+                {
+                    var features = builder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector;
+                    entropyDest.Add(features[entropyIdx]);
+                    giniDest.Add(features[giniIdx]);
+                    anisDest.Add(features[anisIdx]);
+                    dipoleDest.Add(features[dipoleIdx]);
+                }
+            }
+
+            AddDescriptors(filteredSingle, entropySingle, giniSingle, anisSingle, dipoleSingle);
+            AddDescriptors(filteredDual, entropyDual, giniDual, anisDual, dipoleDual);
+
+            string outputPath = descFigOutPath ?? Path.Combine(outputDir, "descriptor_distributions.png");
+            string subtitle = $"Descriptors from normalized channel fractions (N={filteredSingle.Count + filteredDual.Count}, single={filteredSingle.Count}, dual={filteredDual.Count})";
+
+            DescriptorDistributionFigureWriter.Write(
+                outputPath,
+                entropySingle, entropyDual,
+                giniSingle, giniDual,
+                anisSingle, anisDual,
+                dipoleSingle, dipoleDual,
+                descFigBins,
+                descFigTitle,
+                subtitle);
+
+            Console.WriteLine($"Descriptor figure written to {outputPath}");
+            Console.WriteLine($"N_total={filteredSingle.Count + filteredDual.Count}, N_single={filteredSingle.Count}, N_dual={filteredDual.Count}");
+            Console.WriteLine($"Bins={descFigBins}");
+            return;
+        }
 
 
         var trainer = new ModelTrainer();
@@ -2028,7 +2090,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2052,6 +2114,11 @@ internal static class Program
         double normFigMinCountRatio = 2.0;
         int normFigMaxExamples = 2;
         string normFigTitle = "Effect of normalization at identical source position";
+        bool emitDescriptorFigure = false;
+        string? descFigOutPath = null;
+        int descFigBins = 30;
+        string descFigRegime = "all";
+        string descFigTitle = "Distributional descriptors from normalized channel responses";
 
         foreach (var arg in args)
         {
@@ -2143,6 +2210,26 @@ internal static class Program
             {
                 normFigTitle = arg.Substring("--normfig-title=".Length);
             }
+            else if (arg.StartsWith("--emit-descriptor-figure="))
+            {
+                emitDescriptorFigure = bool.Parse(arg.Substring("--emit-descriptor-figure=".Length));
+            }
+            else if (arg.StartsWith("--descfig-out="))
+            {
+                descFigOutPath = arg.Substring("--descfig-out=".Length);
+            }
+            else if (arg.StartsWith("--descfig-bins="))
+            {
+                descFigBins = int.Parse(arg.Substring("--descfig-bins=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--descfig-regime="))
+            {
+                descFigRegime = arg.Substring("--descfig-regime=".Length);
+            }
+            else if (arg.StartsWith("--descfig-title="))
+            {
+                descFigTitle = arg.Substring("--descfig-title=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
@@ -2163,7 +2250,19 @@ internal static class Program
             throw new ArgumentException("--normfig-max-examples must be at least 2");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle);
+        if (!string.Equals(descFigRegime, "all", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(descFigRegime, "single", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(descFigRegime, "dual", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--descfig-regime must be one of 'all', 'single', or 'dual'");
+        }
+
+        if (descFigBins <= 0)
+        {
+            throw new ArgumentException("--descfig-bins must be positive");
+        }
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
