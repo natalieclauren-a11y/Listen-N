@@ -79,7 +79,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitLockedSchemaTex)
@@ -225,6 +225,20 @@ internal static class Program
                 singleErrFigTitle,
                 singleErrFigRegime,
                 singleErrMaxPoints,
+                useGroupedSplit);
+            return;
+        }
+        if (emitDualErrorFigure)
+        {
+            GenerateDualErrorFigure(
+                dataDir,
+                outputDir,
+                durationOverride,
+                dualErrFigOut,
+                dualErrFigTitle,
+                dualErrFigRegime,
+                dualErrErrorMetric,
+                dualErrMaxPoints,
                 useGroupedSplit);
             return;
         }
@@ -898,6 +912,180 @@ internal static class Program
 
         Console.WriteLine($"Single-source error figure written to {outputPath}");
         Console.WriteLine($"N_total_single_rows={singleRows.Count}");
+        if (applyOodPass)
+        {
+            Console.WriteLine($"N_after_OOD_gate={errors.Count} (holdout before gate={beforeGateCount})");
+        }
+        else
+        {
+            Console.WriteLine($"N_eval={errors.Count}");
+        }
+
+        Console.WriteLine($"Median error (cm)={median:F3}");
+        Console.WriteLine($"90th percentile error (cm)={p90:F3}");
+        Console.WriteLine($"95th percentile error (cm)={p95:F3}");
+    }
+
+    private static void GenerateDualErrorFigure(
+        string dataDir,
+        string outputDir,
+        double? durationOverride,
+        string? outPath,
+        string title,
+        string regime,
+        string metric,
+        int maxPoints,
+        bool useGroupedSplit)
+    {
+        string configPath = Path.Combine(outputDir, "pipeline_config.json");
+        if (!File.Exists(configPath))
+        {
+            Console.WriteLine("pipeline_config.json not found in output directory; cannot render dual-source error figure.");
+            Environment.Exit(1);
+        }
+
+        var config = JsonSerializer.Deserialize<PipelineConfiguration>(File.ReadAllText(configPath))
+                     ?? throw new InvalidOperationException("Failed to deserialize pipeline_config.json");
+
+        bool useMean = metric.Equals("mean", StringComparison.OrdinalIgnoreCase);
+        bool useMax = metric.Equals("max", StringComparison.OrdinalIgnoreCase);
+        if (!useMean && !useMax)
+        {
+            Console.WriteLine($"Unsupported dual error metric '{metric}'. Expected 'mean' or 'max'.");
+            Environment.Exit(1);
+        }
+
+        string metricLabel = useMean ? "mean" : "max";
+
+        var featureBuilder = new FeatureBuilder(config.Epsilon, config.DipolePositions);
+        var mlContext = new MLContext(seed: 42);
+
+        string regressorPath = Path.Combine(outputDir, "dual_regressor");
+        if (!Directory.Exists(regressorPath))
+        {
+            Console.WriteLine("dual_regressor artifacts not found in output directory; cannot render dual-source error figure.");
+            Environment.Exit(1);
+        }
+
+        var regressor = RegressionModelGroup.Load(mlContext, regressorPath);
+
+        bool applyOodPass = regime.Equals("ood-pass", StringComparison.OrdinalIgnoreCase);
+        MahalanobisScorer? mahalanobis = null;
+        if (applyOodPass)
+        {
+            if (!TryLoadMahalanobis(Path.Combine(outputDir, "mahalanobis.json"), out mahalanobis))
+            {
+                Console.WriteLine("Mahalanobis model not found in artifacts; cannot apply ood-pass regime.");
+                Environment.Exit(1);
+            }
+        }
+
+        var dualRows = LoadDualGroups(dataDir, durationOverride);
+        if (dualRows.Count == 0)
+        {
+            Console.WriteLine("No dual-source rows loaded. Check --data-dir.");
+            Environment.Exit(1);
+        }
+
+        IReadOnlyList<LocalizationRow> evalRows;
+        if (useGroupedSplit)
+        {
+            var grouped = Grouping.GroupSplit(dualRows, 0.2, 42);
+            evalRows = grouped.Holdout;
+        }
+        else
+        {
+            var rng = new Random(42);
+            var shuffled = dualRows.OrderBy(_ => rng.Next()).ToList();
+            int holdoutCount = Math.Max(1, (int)Math.Round(shuffled.Count * 0.2));
+            evalRows = shuffled.Take(holdoutCount).ToList();
+        }
+
+        if (evalRows.Count == 0)
+        {
+            Console.WriteLine("Holdout split was empty; cannot generate dual-source error figure.");
+            Environment.Exit(1);
+        }
+
+        int beforeGateCount = evalRows.Count;
+        var errors = new List<double>(evalRows.Count);
+
+        foreach (var row in evalRows)
+        {
+            if (row.DualCoordinates is not { Length: 6 } truth)
+            {
+                continue;
+            }
+
+            var features = featureBuilder.BuildFeatures(row.Channels, row.DurationSeconds).FeatureVector.Select(f => (float)f).ToArray();
+            if (applyOodPass && mahalanobis != null)
+            {
+                double distance = mahalanobis.Score(ExtractOodVector(features).Select(v => (double)v).ToArray());
+                if (distance > config.OutOfDistributionThreshold)
+                {
+                    continue;
+                }
+            }
+
+            var prediction = regressor.Predict(features);
+            if (prediction.Length < 6)
+            {
+                continue;
+            }
+
+            var predA = prediction.Take(3).ToArray();
+            var predB = prediction.Skip(3).Take(3).ToArray();
+            var truthA = truth.Take(3).ToArray();
+            var truthB = truth.Skip(3).Take(3).ToArray();
+
+            double eA1 = Euclidean(predA, truthA);
+            double eB1 = Euclidean(predB, truthB);
+            double agg1 = useMean ? (eA1 + eB1) / 2.0 : Math.Max(eA1, eB1);
+
+            double eA2 = Euclidean(predA, truthB);
+            double eB2 = Euclidean(predB, truthA);
+            double agg2 = useMean ? (eA2 + eB2) / 2.0 : Math.Max(eA2, eB2);
+
+            errors.Add(Math.Min(agg1, agg2));
+        }
+
+        if (errors.Count == 0)
+        {
+            Console.WriteLine("No valid evaluation examples after filtering; cannot generate figure.");
+            Environment.Exit(1);
+        }
+
+        var sortedErrors = errors.OrderBy(e => e).ToList();
+        var plotErrors = sortedErrors;
+        if (sortedErrors.Count > maxPoints && maxPoints > 0)
+        {
+            double stride = sortedErrors.Count / (double)maxPoints;
+            var subsampled = new List<double>(maxPoints);
+            for (int i = 0; i < maxPoints; i++)
+            {
+                int idx = (int)Math.Floor(i * stride);
+                if (idx >= sortedErrors.Count)
+                {
+                    idx = sortedErrors.Count - 1;
+                }
+
+                subsampled.Add(sortedErrors[idx]);
+            }
+
+            subsampled[^1] = sortedErrors[^1];
+            plotErrors = subsampled;
+        }
+
+        string outputPath = outPath ?? Path.Combine(outputDir, "FigureE_dual_source_error_cdf.png");
+        string subtitle = $"N_eval={errors.Count}, OOD threshold={config.OutOfDistributionThreshold:F4}, metric={metricLabel}";
+        DualSourceErrorFigureWriter.Write(outputPath, plotErrors, title, subtitle);
+
+        double median = Percentile(sortedErrors, 0.5);
+        double p90 = Percentile(sortedErrors, 0.9);
+        double p95 = Percentile(sortedErrors, 0.95);
+
+        Console.WriteLine($"Dual-source error figure written to {outputPath}");
+        Console.WriteLine($"N_total_dual_rows={dualRows.Count}");
         if (applyOodPass)
         {
             Console.WriteLine($"N_after_OOD_gate={errors.Count} (holdout before gate={beforeGateCount})");
@@ -2844,7 +3032,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2896,6 +3084,12 @@ internal static class Program
         string singleErrFigTitle = "Single-source localization error distribution";
         string singleErrFigRegime = "ood-pass";
         int singleErrMaxPoints = int.MaxValue;
+        bool emitDualErrorFigure = false;
+        string? dualErrFigOut = null;
+        string dualErrFigTitle = "Dual-source localization error distribution (assignment-aware)";
+        string dualErrFigRegime = "ood-pass";
+        string dualErrErrorMetric = "mean";
+        int dualErrMaxPoints = int.MaxValue;
 
         foreach (var arg in args)
         {
@@ -3099,6 +3293,30 @@ internal static class Program
             {
                 singleErrMaxPoints = int.Parse(arg.Substring("--singleerr-max-points=".Length), CultureInfo.InvariantCulture);
             }
+            else if (arg.StartsWith("--emit-dual-error-figure="))
+            {
+                emitDualErrorFigure = bool.Parse(arg.Substring("--emit-dual-error-figure=".Length));
+            }
+            else if (arg.StartsWith("--dualerr-fig-out="))
+            {
+                dualErrFigOut = arg.Substring("--dualerr-fig-out=".Length);
+            }
+            else if (arg.StartsWith("--dualerr-fig-title="))
+            {
+                dualErrFigTitle = arg.Substring("--dualerr-fig-title=".Length);
+            }
+            else if (arg.StartsWith("--dualerr-fig-regime="))
+            {
+                dualErrFigRegime = arg.Substring("--dualerr-fig-regime=".Length);
+            }
+            else if (arg.StartsWith("--dualerr-error-metric="))
+            {
+                dualErrErrorMetric = arg.Substring("--dualerr-error-metric=".Length);
+            }
+            else if (arg.StartsWith("--dualerr-max-points="))
+            {
+                dualErrMaxPoints = int.Parse(arg.Substring("--dualerr-max-points=".Length), CultureInfo.InvariantCulture);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
@@ -3181,7 +3399,24 @@ internal static class Program
             throw new ArgumentException("--singleerr-max-points must be positive");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints);
+        if (!string.Equals(dualErrFigRegime, "ood-pass", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(dualErrFigRegime, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--dualerr-fig-regime must be one of 'ood-pass' or 'all'");
+        }
+
+        if (!string.Equals(dualErrErrorMetric, "mean", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(dualErrErrorMetric, "max", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--dualerr-error-metric must be one of 'mean' or 'max'");
+        }
+
+        if (dualErrMaxPoints <= 0)
+        {
+            throw new ArgumentException("--dualerr-max-points must be positive");
+        }
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
