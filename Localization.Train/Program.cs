@@ -60,8 +60,18 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
+
+        if (emitFeatureSchemaTex)
+        {
+            var builder = new FeatureBuilder();
+            string outputPath = texOutPath ?? Path.Combine(outputDir, "raw_feature_schema.tex");
+            string tex = FeatureSchemaTexWriter.BuildRawFeatureSchemaTableTex(builder, texCaption, texLabel);
+            FeatureSchemaTexWriter.WriteTo(outputPath, tex);
+            Console.WriteLine($"Feature schema LaTeX written to {outputPath}");
+            return;
+        }
 
         var trainer = new ModelTrainer();
         var featureBuilder = trainer.FeatureBuilder;
@@ -1988,7 +1998,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -2001,6 +2011,10 @@ internal static class Program
         int negativeControlSeed = 2024;
         bool runPermutationControl = false;
         bool runLabelShuffleControl = false;
+        bool emitFeatureSchemaTex = false;
+        string? texOutPath = null;
+        string texCaption = "Raw feature schema derived from sliding analysis windows.";
+        string texLabel = "tab:raw_feature_schema";
 
         foreach (var arg in args)
         {
@@ -2048,12 +2062,28 @@ internal static class Program
             {
                 runLabelShuffleControl = true;
             }
+            else if (arg.StartsWith("--emit-feature-schema-tex="))
+            {
+                emitFeatureSchemaTex = bool.Parse(arg.Substring("--emit-feature-schema-tex=".Length));
+            }
+            else if (arg.StartsWith("--tex-out="))
+            {
+                texOutPath = arg.Substring("--tex-out=".Length);
+            }
+            else if (arg.StartsWith("--tex-caption="))
+            {
+                texCaption = arg.Substring("--tex-caption=".Length);
+            }
+            else if (arg.StartsWith("--tex-label="))
+            {
+                texLabel = arg.Substring("--tex-label=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
         runLabelShuffleControl |= runNegativeControls;
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl);
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
