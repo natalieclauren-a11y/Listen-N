@@ -79,7 +79,7 @@ internal static class Program
 
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitLockedSchemaTex)
@@ -335,8 +335,6 @@ internal static class Program
 
         var allClassificationExamples = classificationExamples.Select(c => c.Example).ToList();
 
-        const int reliabilityBins = 10;
-
         var split = StratifiedThreeWaySplit(classificationExamples, calibrationFraction: 0.0, testFraction: 0.2, seed: 42);
         var (rowClassifierModel, rowMetrics, importances) = trainer.TrainClassifier(split.Train.Select(c => c.Example).ToList(), split.Test.Select(c => c.Example).ToList());
         var cv = trainer.CrossValidateClassifier(allClassificationExamples);
@@ -344,6 +342,8 @@ internal static class Program
 
         var rowPredictions = BuildPredictions(trainer, rowClassifierModel, split.Test.Select(c => c.Example).ToList());
         var rowSplitMetrics = BuildSplitMetrics(rowMetrics, rowPredictions);
+
+        var holdoutExamples = split.Test.Select(c => c.Example).ToList();
 
         SplitMetrics? groupedSplitMetrics = null;
         BinaryClassificationMetrics? groupedMlNetMetrics = null;
@@ -372,15 +372,12 @@ internal static class Program
                 classifierHoldoutModel = groupedModel;
                 featureImportances = groupedImportances;
                 holdoutPredictions = groupedPredictions;
+                holdoutExamples = groupedHoldoutExamples;
             }
         }
 
-        var probabilitySamples = holdoutPredictions
-            .Select(p => (Probability: (double)p.Prediction.Probability, p.Label))
-            .ToList();
-        var brier = CalibrationModel.ComputeBrierScore(probabilitySamples);
-        var ece = CalibrationModel.ComputeExpectedCalibrationError(probabilitySamples, reliabilityBins, p => p);
-        var reliability = CalibrationModel.BuildReliabilityBins(probabilitySamples, reliabilityBins, p => p);
+        double brier = double.NaN;
+        double ece = double.NaN;
 
         Console.WriteLine("Classifier holdout metrics (ML.NET):");
         PrintClassifierMetrics(rowMetrics, rowSplitMetrics);
@@ -405,15 +402,24 @@ internal static class Program
             Console.WriteLine($"  {sample.Prediction.Probability:F4} | label={(sample.Label ? 1 : 0)}");
         }
 
-        var reliabilityPlot = BuildReliabilityDiagram(
-            reliability,
-            brier,
-            reliabilityBins,
-            "Platt-calibrated (ML.NET) Probability");
-        var reliabilityPath = Path.Combine(outputDir, "reliability_diagram.png");
-        using (var stream = File.Open(reliabilityPath, FileMode.Create))
+        if (holdoutExamples.Count > 0)
         {
-            new PngExporter { Width = 900, Height = 600 }.Export(reliabilityPlot, stream);
+            var testData = trainer.MlContext.Data.LoadFromEnumerable(holdoutExamples);
+            var scored = classifierHoldoutModel.Transform(testData);
+            var calibrationMetrics = ReliabilityDiagramWriter.ComputeBinaryCalibrationMetrics(trainer.MlContext, scored, reliabilityBinCount);
+            brier = calibrationMetrics.BrierScore;
+            ece = calibrationMetrics.ExpectedCalibrationError;
+
+            if (emitReliabilityFigure)
+            {
+                string reliabilityOutPath = reliabilityFigOutPath ?? Path.Combine(outputDir, "reliability.png");
+                ReliabilityDiagramWriter.WriteBinaryReliabilityDiagram(trainer.MlContext, scored, reliabilityOutPath, reliabilityBinCount);
+                Console.WriteLine($"Reliability diagram written to {reliabilityOutPath}");
+            }
+            else
+            {
+                Console.WriteLine($"Calibration: Brier={brier:F4}, ECE={ece:F4}, bins={reliabilityBinCount}, N={calibrationMetrics.Count}");
+            }
         }
 
         // Regression datasets
@@ -518,7 +524,7 @@ internal static class Program
             BrierScoreRaw = brier,
             BrierScoreCalibrated = brier,
             ExpectedCalibrationError = ece,
-            ReliabilityBinCount = reliabilityBins
+            ReliabilityBinCount = reliabilityBinCount
         };
 
         var summary = new TrainingSummary
@@ -3227,7 +3233,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints, bool EmitOutcomeFigure, string? OutcomeFigOut, string OutcomeFigTitle, double? OutcomeMinSeparationCm, string OutcomeRegime, bool OutcomeOodPassOnly) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitReliabilityFigure, string? ReliabilityFigOutPath, int ReliabilityBinCount, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints, bool EmitOutcomeFigure, string? OutcomeFigOut, string OutcomeFigTitle, double? OutcomeMinSeparationCm, string OutcomeRegime, bool OutcomeOodPassOnly) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -3274,6 +3280,9 @@ internal static class Program
         int clfFigMaxPoints = 5000;
         double clfFigThreshold = 0.5;
         string clfFigRegime = "all";
+        bool emitReliabilityFigure = false;
+        string? reliabilityFigOutPath = null;
+        int reliabilityBinCount = 10;
         bool emitSingleErrorFigure = false;
         string? singleErrFigOut = null;
         string singleErrFigTitle = "Single-source localization error distribution";
@@ -3474,6 +3483,18 @@ internal static class Program
             {
                 clfFigRegime = arg.Substring("--clf-fig-regime=".Length);
             }
+            else if (arg.StartsWith("--emit-reliability-figure="))
+            {
+                emitReliabilityFigure = bool.Parse(arg.Substring("--emit-reliability-figure=".Length));
+            }
+            else if (arg.StartsWith("--reliability-fig-out="))
+            {
+                reliabilityFigOutPath = arg.Substring("--reliability-fig-out=".Length);
+            }
+            else if (arg.StartsWith("--reliability-bins="))
+            {
+                reliabilityBinCount = int.Parse(arg.Substring("--reliability-bins=".Length), CultureInfo.InvariantCulture);
+            }
             else if (arg.StartsWith("--emit-single-error-figure="))
             {
                 emitSingleErrorFigure = bool.Parse(arg.Substring("--emit-single-error-figure=".Length));
@@ -3613,6 +3634,11 @@ internal static class Program
             throw new ArgumentException("--clf-fig-regime must be one of 'all' or 'ood-pass'");
         }
 
+        if (reliabilityBinCount <= 0)
+        {
+            throw new ArgumentException("--reliability-bins must be positive");
+        }
+
         if (!string.Equals(singleErrFigRegime, "ood-pass", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(singleErrFigRegime, "all", StringComparison.OrdinalIgnoreCase))
         {
@@ -3652,7 +3678,7 @@ internal static class Program
             throw new ArgumentException("--outcome-min-separation-cm must be positive when provided");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly);
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly);
     }
 
     private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)

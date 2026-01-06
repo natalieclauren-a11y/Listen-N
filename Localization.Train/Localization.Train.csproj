@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.ML.FastTree" Version="5.0.0" />
     <PackageReference Include="ExcelDataReader" Version="3.6.0" />
     <PackageReference Include="ExcelDataReader.DataSet" Version="3.6.0" />
+    <PackageReference Include="ScottPlot" Version="5.0.55" />
     <PackageReference Include="OxyPlot.Core" Version="2.2.0" />
     <PackageReference Include="OxyPlot.SkiaSharp" Version="2.2.0" />
   </ItemGroup>
