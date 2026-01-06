@@ -16,6 +16,14 @@ using OxyPlot.SkiaSharp;
 
 namespace Localization.Train;
 
+// Domain shift figure flags:
+// --emit-domainshift-outcome-coverage-figure=true|false
+// --domainshift-outcome-coverage-out=PATH
+// --domainshift-data-dir=PATH
+// --domainshift-single-files=FILE1,FILE2
+// --domainshift-dual-files=FILE1,FILE2
+// --artifacts-dir=PATH
+
 internal static class Program
 {
     private static readonly JsonSerializerOptions JsonWithNamedFloats = new()
@@ -24,19 +32,19 @@ internal static class Program
         NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
     };
 
-    private static readonly string[] SingleGroups =
+    internal static readonly string[] SingleGroups =
     {
         "Cf_30_Second_LMX",
         "Single_60_Second_Cf"
     };
 
-    private static readonly string[] DualGroups =
+    internal static readonly string[] DualGroups =
     {
         "Dual_Cf_30_Second",
         "Dual_Cf_60_Second_LMX"
     };
 
-    private static readonly Dictionary<string, string> PairMetadataGroups = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly Dictionary<string, string> PairMetadataGroups = new(StringComparer.OrdinalIgnoreCase)
     {
         { "Dual_Cf_30_Second", "pair_metadata_30" },
         { "Dual_Cf_60_Second_LMX", "pair_metadata_60" }
@@ -77,9 +85,23 @@ internal static class Program
         return -1;
     }
 
+    private static IReadOnlyList<string> ParseFileList(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return Array.Empty<string>();
+        }
+
+        return raw
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(entry => entry.Trim())
+            .Where(entry => entry.Length > 0)
+            .ToList();
+    }
+
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (emitLockedSchemaTex)
@@ -626,6 +648,27 @@ internal static class Program
                 runPermutationControl,
                 runLabelShuffleControl,
                 config);
+        }
+
+        if (emitDomainShiftOutcomeCoverageFigure)
+        {
+            string artifactDirectory = string.IsNullOrWhiteSpace(artifactsDir) ? outputDir : artifactsDir;
+            var pipelineForDomainShift = LocalizationPipeline.Load(artifactDirectory);
+            string outputPath = domainShiftOutcomeCoverageOut ?? Path.Combine(outputDir, "domainshift_outcome_coverage.png");
+
+            var singleOverrideList = ParseFileList(domainShiftSingleFiles);
+            var dualOverrideList = ParseFileList(domainShiftDualFiles);
+
+            DomainShiftOutcomeCoverageFigureWriter.Write(
+                pipelineForDomainShift,
+                dataDir,
+                domainShiftDataDir,
+                outputPath,
+                durationOverride,
+                singleOverrideList,
+                dualOverrideList);
+
+            Console.WriteLine($"Domain-shift outcome coverage figure saved to {outputPath}");
         }
     }
 
@@ -3233,7 +3276,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitReliabilityFigure, string? ReliabilityFigOutPath, int ReliabilityBinCount, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints, bool EmitOutcomeFigure, string? OutcomeFigOut, string OutcomeFigTitle, double? OutcomeMinSeparationCm, string OutcomeRegime, bool OutcomeOodPassOnly) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitReliabilityFigure, string? ReliabilityFigOutPath, int ReliabilityBinCount, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints, bool EmitOutcomeFigure, string? OutcomeFigOut, string OutcomeFigTitle, double? OutcomeMinSeparationCm, string OutcomeRegime, bool OutcomeOodPassOnly, bool EmitDomainShiftOutcomeCoverageFigure, string? DomainShiftOutcomeCoverageOut, string DomainShiftDataDir, string? DomainShiftSingleFiles, string? DomainShiftDualFiles, string? ArtifactsDir) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -3300,12 +3343,23 @@ internal static class Program
         double? outcomeMinSeparationCm = null;
         string outcomeRegime = "eval";
         bool outcomeOodPassOnly = false;
+        bool emitDomainShiftOutcomeCoverageFigure = false;
+        string? domainShiftOutcomeCoverageOut = null;
+        string domainShiftDataDir = dataDir;
+        string? domainShiftSingleFiles = null;
+        string? domainShiftDualFiles = null;
+        string? artifactsDir = null;
+        bool domainShiftDataDirExplicit = false;
 
         foreach (var arg in args)
         {
             if (arg.StartsWith("--data-dir="))
             {
                 dataDir = arg.Substring("--data-dir=".Length);
+                if (!domainShiftDataDirExplicit)
+                {
+                    domainShiftDataDir = dataDir;
+                }
             }
             else if (arg.StartsWith("--output-dir="))
             {
@@ -3563,6 +3617,31 @@ internal static class Program
             {
                 outcomeOodPassOnly = bool.Parse(arg.Substring("--outcome-ood-pass-only=".Length));
             }
+            else if (arg.StartsWith("--emit-domainshift-outcome-coverage-figure="))
+            {
+                emitDomainShiftOutcomeCoverageFigure = bool.Parse(arg.Substring("--emit-domainshift-outcome-coverage-figure=".Length));
+            }
+            else if (arg.StartsWith("--domainshift-outcome-coverage-out="))
+            {
+                domainShiftOutcomeCoverageOut = arg.Substring("--domainshift-outcome-coverage-out=".Length);
+            }
+            else if (arg.StartsWith("--domainshift-data-dir="))
+            {
+                domainShiftDataDir = arg.Substring("--domainshift-data-dir=".Length);
+                domainShiftDataDirExplicit = true;
+            }
+            else if (arg.StartsWith("--domainshift-single-files="))
+            {
+                domainShiftSingleFiles = arg.Substring("--domainshift-single-files=".Length);
+            }
+            else if (arg.StartsWith("--domainshift-dual-files="))
+            {
+                domainShiftDualFiles = arg.Substring("--domainshift-dual-files=".Length);
+            }
+            else if (arg.StartsWith("--artifacts-dir="))
+            {
+                artifactsDir = arg.Substring("--artifacts-dir=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
@@ -3678,10 +3757,10 @@ internal static class Program
             throw new ArgumentException("--outcome-min-separation-cm must be positive when provided");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly);
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir);
     }
 
-    private static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
+    internal static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
     {
         var rows = new List<LocalizationRow>();
         foreach (var group in SingleGroups)
@@ -3702,7 +3781,7 @@ internal static class Program
         return rows;
     }
 
-    private static List<LocalizationRow> LoadDualGroups(string dataDir, double? durationOverride)
+    internal static List<LocalizationRow> LoadDualGroups(string dataDir, double? durationOverride)
     {
         var list = new List<LocalizationRow>();
         foreach (var group in DualGroups)
@@ -3819,7 +3898,7 @@ internal static class Program
         return (x, y, z);
     }
 
-    private static List<string> FindFilesByPrefix(string dataDir, string prefix)
+    internal static List<string> FindFilesByPrefix(string dataDir, string prefix)
     {
         var files = Directory.EnumerateFiles(dataDir)
             .Where(path =>
