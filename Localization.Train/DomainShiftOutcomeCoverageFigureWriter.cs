@@ -5,6 +5,7 @@ using System.Linq;
 using Localization.ML;
 using OxyPlot;
 using OxyPlot.Axes;
+using OxyPlot.Legends;
 using OxyPlot.Series;
 using OxyPlot.SkiaSharp;
 
@@ -80,20 +81,24 @@ public static class DomainShiftOutcomeCoverageFigureWriter
         var model = new PlotModel
         {
             Title = "Outcome coverage: baseline vs domain shift",
+        };
+
+        model.Legends.Add(new Legend
+        {
             LegendPlacement = LegendPlacement.Outside,
             LegendPosition = LegendPosition.RightTop,
-            LegendBorderThickness = 0,
-        };
+            LegendBorderThickness = 0
+        });
 
         model.Axes.Add(new CategoryAxis
         {
-            Position = AxisPosition.Bottom,
+            Position = AxisPosition.Left,
             Labels = { "Baseline", "Domain shift" }
         });
 
         model.Axes.Add(new LinearAxis
         {
-            Position = AxisPosition.Left,
+            Position = AxisPosition.Bottom,
             Minimum = 0,
             Maximum = 100,
             Title = "Fraction of samples (%)",
@@ -110,7 +115,7 @@ public static class DomainShiftOutcomeCoverageFigureWriter
             double domainShiftPct = domainShiftTotal == 0 ? 0 : domainShiftCount * 100.0 / domainShiftTotal;
 
             var color = colorMap[label];
-            var series = new ColumnSeries
+            var series = new BarSeries
             {
                 Title = label,
                 IsStacked = true,
@@ -119,8 +124,8 @@ public static class DomainShiftOutcomeCoverageFigureWriter
                 StrokeThickness = 1.5
             };
 
-            series.Items.Add(new ColumnItem(baselinePct));
-            series.Items.Add(new ColumnItem(domainShiftPct));
+            series.Items.Add(new BarItem { Value = baselinePct });
+            series.Items.Add(new BarItem { Value = domainShiftPct });
 
             model.Series.Add(series);
         }
@@ -221,16 +226,11 @@ public static class DomainShiftOutcomeCoverageFigureWriter
     {
         var paths = new List<string>();
         var candidates = (overrideFiles != null && overrideFiles.Count > 0)
-            ? overrideFiles
+            ? overrideFiles.Where(c => !string.IsNullOrWhiteSpace(c)).ToList()
             : baselineFiles.Select(Path.GetFileName).Where(n => !string.IsNullOrWhiteSpace(n)).ToList();
 
         foreach (var candidate in candidates)
         {
-            if (candidate == null)
-            {
-                continue;
-            }
-
             var fullPath = Path.IsPathRooted(candidate)
                 ? candidate
                 : Path.Combine(dataDir, candidate);
