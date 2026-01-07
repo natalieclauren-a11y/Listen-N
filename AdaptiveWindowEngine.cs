@@ -20,6 +20,7 @@ namespace Listen_N
     using System.Linq;
     using System.Threading;
     using System.Threading.Channels;
+    using Integrated.Contracts;
 
     // Struct representing a single detection event with timestamp and detector ID
     public readonly struct Detection
@@ -67,6 +68,9 @@ namespace Listen_N
         }
 
         public event Action<Estimate>? OnEstimate; // callback for new estimates
+        public event Action<RtWindowSummary>? OnWindowSummary; // callback for per-window summaries
+
+        private const int DetectorCount = 15;
 
         // ——— configuration ———
         private readonly int[] _tgUs;   // available gate widths (µs)
@@ -226,7 +230,7 @@ namespace Listen_N
             _enableFileLog = enableFileLog && startWorker;   // key line: tests (startWorker:false) will not log
             _logPath = logPath;
             // initialize accumulator and channel infrastructure
-            _acc = new BaseBinAccumulator(_deltaUs, _wMax);
+            _acc = new BaseBinAccumulator(_deltaUs, _wMax, DetectorCount);
             _inbound = Channel.CreateBounded<Detection>(new BoundedChannelOptions(1 << 16)
             {
                 SingleWriter = false,
@@ -298,7 +302,7 @@ namespace Listen_N
             var r = reader ?? _inbound.Reader;
             while (r.TryRead(out var d))
             {
-                _acc.Add(d.TicksUs);
+                _acc.Add(d.TicksUs, d.DetectorId);
                 _lastTimestampUs = d.TicksUs;
             }
         }
@@ -572,6 +576,24 @@ namespace Listen_N
                 PoissonQuietStreak = _poissonQuietStreak
             };
 
+            var counts = _acc.GetDetectorCounts(_W);
+            double durationSeconds = Math.Max(0, _W);
+            double totalCounts = counts.Sum();
+            double rateTotalCps = durationSeconds > 0 ? totalCounts / durationSeconds : 0.0;
+            var windowEndUtc = DateTimeOffset.UtcNow;
+
+            var summary = new RtWindowSummary
+            {
+                WindowStartUtc = windowEndUtc.AddSeconds(-durationSeconds),
+                WindowEndUtc = windowEndUtc,
+                DurationSeconds = durationSeconds,
+                Counts15 = counts,
+                RtState = est.State,
+                RateTotalCps = rateTotalCps,
+                QualityScalar = est.ZY,
+                IsConfusedCandidate = false
+            };
+
             // log estimate
             var log = PreflightOracle.Run(
                 DateTime.UtcNow,
@@ -598,7 +620,7 @@ namespace Listen_N
                 AppendLineShared(_logPath, json);
             }
 
-
+            OnWindowSummary?.Invoke(summary);
             OnEstimate?.Invoke(est);
         }
 
@@ -1149,11 +1171,16 @@ namespace Listen_N
             private int _head;   // head pointer in ring buffer
             private int _total;  // total counts currently stored
 
-            public BaseBinAccumulator(int deltaUs, double wmaxSec)
+            private readonly int _detectorCount;
+            private readonly int[,] _countsByDetector;
+
+            public BaseBinAccumulator(int deltaUs, double wmaxSec, int detectorCount)
             {
                 DeltaUs = deltaUs;
                 MaxBins = (int)Math.Ceiling(wmaxSec * 1e6 / deltaUs);
                 _counts = new int[MaxBins];
+                _detectorCount = detectorCount;
+                _countsByDetector = new int[_detectorCount, MaxBins];
             }
 
             public long RightEdgeUs => _t0Us + (long)MaxBins * DeltaUs;
@@ -1168,13 +1195,17 @@ namespace Listen_N
                 {
                     _total -= _counts[_head];
                     _counts[_head] = 0;
+                    for (int det = 0; det < _detectorCount; det++)
+                    {
+                        _countsByDetector[det, _head] = 0;
+                    }
                     _head = (_head + 1) % MaxBins;
                 }
                 _t0Us += (long)Math.Min(bins, MaxBins) * DeltaUs;
             }
 
             // Add detection event
-            public void Add(long tUs)
+            public void Add(long tUs, byte detectorId)
             {
                 if (_t0Us == 0) _t0Us = (tUs / DeltaUs) * DeltaUs;
                 long rightUs = _t0Us + (long)MaxBins * DeltaUs;
@@ -1187,12 +1218,17 @@ namespace Listen_N
                 if (idx < 0 || idx >= MaxBins) return;
                 int phys = (_head + idx) % MaxBins;
                 _counts[phys]++;
+                if (detectorId < _detectorCount)
+                {
+                    _countsByDetector[detectorId, phys]++;
+                }
                 _total++;
             }
 
             public void ResetTo(long tUs)
             {
                 Array.Clear(_counts, 0, _counts.Length);
+                Array.Clear(_countsByDetector, 0, _countsByDetector.Length);
                 _head = 0;
                 _total = 0;
                 _t0Us = (tUs / DeltaUs) * DeltaUs;
@@ -1277,6 +1313,29 @@ namespace Listen_N
                 }
 
                 return bins;
+            }
+
+            public double[] GetDetectorCounts(double wSec)
+            {
+                var counts = new double[_detectorCount];
+                if (_detectorCount == 0 || wSec <= 0)
+                {
+                    return counts;
+                }
+
+                int binsInWindow = Math.Max(1, (int)Math.Floor(wSec * 1e6 / DeltaUs));
+                binsInWindow = Math.Min(binsInWindow, MaxBins);
+
+                for (int b = 0; b < binsInWindow; b++)
+                {
+                    int idx = (_head + b) % MaxBins;
+                    for (int det = 0; det < _detectorCount; det++)
+                    {
+                        counts[det] += _countsByDetector[det, idx];
+                    }
+                }
+
+                return counts;
             }
         }
 
