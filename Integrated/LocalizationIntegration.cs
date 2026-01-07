@@ -4,35 +4,40 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Integrated.Contracts;
+using ContractsAnalysisSnapshot = Integrated.Contracts.AnalysisSnapshot;
+using ContractsLocalizationRequest = Integrated.Contracts.LocalizationRequest;
+using ContractsLocalizationResult = Integrated.Contracts.LocalizationResult;
+using ContractsLocalizationRow = Integrated.Contracts.LocalizationRow;
+using ContractsLocalizationTriggerSource = Integrated.Contracts.LocalizationTriggerSource;
 
 namespace Integrated.Runtime
 {
     public interface ILocalizationPipeline
     {
-        Task<LocalizationResult> RunAsync(LocalizationRow row, CancellationToken cancellationToken);
+        Task<ContractsLocalizationResult> RunAsync(ContractsLocalizationRow row, CancellationToken cancellationToken);
     }
 
     public sealed class LocalizationChannelBridge
     {
-        public LocalizationChannelBridge(Channel<AnalysisSnapshot> snapshots, Channel<LocalizationRequest> requests)
+        public LocalizationChannelBridge(Channel<ContractsAnalysisSnapshot> snapshots, Channel<ContractsLocalizationRequest> requests)
         {
             Snapshots = snapshots;
             Requests = requests;
         }
 
-        public Channel<AnalysisSnapshot> Snapshots { get; }
-        public Channel<LocalizationRequest> Requests { get; }
+        public Channel<ContractsAnalysisSnapshot> Snapshots { get; }
+        public Channel<ContractsLocalizationRequest> Requests { get; }
 
         public static LocalizationChannelBridge Create(int snapshotCapacity = 1, int requestCapacity = 4)
         {
-            var snapshots = Channel.CreateBounded<AnalysisSnapshot>(new BoundedChannelOptions(snapshotCapacity)
+            var snapshots = Channel.CreateBounded<ContractsAnalysisSnapshot>(new BoundedChannelOptions(snapshotCapacity)
             {
                 FullMode = BoundedChannelFullMode.DropOldest,
                 SingleReader = false,
                 SingleWriter = false
             });
 
-            var requests = Channel.CreateBounded<LocalizationRequest>(new BoundedChannelOptions(requestCapacity)
+            var requests = Channel.CreateBounded<ContractsLocalizationRequest>(new BoundedChannelOptions(requestCapacity)
             {
                 FullMode = BoundedChannelFullMode.DropOldest,
                 SingleReader = true,
@@ -60,25 +65,46 @@ namespace Integrated.Runtime
 
     public sealed class LocalizationOrchestratorService : ILocalizationTrigger
     {
-        private readonly ChannelReader<AnalysisSnapshot> _snapshotReader;
-        private readonly Channel<LocalizationRequest> _requestChannel;
+        private readonly ChannelReader<ContractsAnalysisSnapshot> _snapshotReader;
+        private readonly Channel<ContractsLocalizationRequest> _requestChannel;
         private readonly ILocalizationTriggerPolicy _policy;
         private readonly ILocalizationPipeline _pipeline;
+        private readonly LocalizationEpisodePolicy _episodePolicy;
+        private readonly Channel<LocalizationRequest> _workerChannel;
 
         private readonly object _snapshotLock = new();
         private AnalysisSnapshot? _latestSnapshot;
         private Guid? _pendingAutoSnapshotId;
 
         public LocalizationOrchestratorService(
-            ChannelReader<AnalysisSnapshot> snapshotReader,
-            Channel<LocalizationRequest> requestChannel,
+            ChannelReader<ContractsAnalysisSnapshot> snapshotReader,
+            Channel<ContractsLocalizationRequest> requestChannel,
             ILocalizationTriggerPolicy policy,
             ILocalizationPipeline pipeline)
+            : this(
+                snapshotReader,
+                requestChannel,
+                policy,
+                pipeline,
+                new LocalizationEpisodePolicy(),
+                CreateWorkerChannel())
+        {
+        }
+
+        public LocalizationOrchestratorService(
+            ChannelReader<ContractsAnalysisSnapshot> snapshotReader,
+            Channel<ContractsLocalizationRequest> requestChannel,
+            ILocalizationTriggerPolicy policy,
+            ILocalizationPipeline pipeline,
+            LocalizationEpisodePolicy episodePolicy,
+            Channel<LocalizationRequest> workerChannel)
         {
             _snapshotReader = snapshotReader;
             _requestChannel = requestChannel;
             _policy = policy;
             _pipeline = pipeline;
+            _episodePolicy = episodePolicy;
+            _workerChannel = workerChannel;
         }
 
         public Task RunAsync(CancellationToken cancellationToken)
@@ -88,17 +114,20 @@ namespace Integrated.Runtime
             return Task.WhenAll(consumeSnapshots, processRequests);
         }
 
-        public Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? metadata = null)
+        public Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null)
         {
-            var request = new LocalizationRequest
+            var request = _episodePolicy.BuildManualProbeRequest();
+            EnqueueWorkerRequest(request);
+
+            var contractRequest = new ContractsLocalizationRequest
             {
                 TriggerReason = reason,
-                TriggerSource = LocalizationTriggerSource.Manual,
+                TriggerSource = ContractsLocalizationTriggerSource.Manual,
                 AllowPolicyBypass = true,
-                Metadata = metadata
+                Metadata = tags
             };
 
-            EnqueueRequest(request);
+            EnqueueRequest(contractRequest);
             return Task.FromResult(request);
         }
 
@@ -118,7 +147,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private void TryEnqueueAuto(AnalysisSnapshot snapshot)
+        private void TryEnqueueAuto(ContractsAnalysisSnapshot snapshot)
         {
             if (_pendingAutoSnapshotId.HasValue && _pendingAutoSnapshotId.Value == snapshot.SnapshotId)
             {
@@ -127,10 +156,10 @@ namespace Integrated.Runtime
 
             _pendingAutoSnapshotId = snapshot.SnapshotId;
 
-            var request = new LocalizationRequest
+            var request = new ContractsLocalizationRequest
             {
                 TriggerReason = "AutoPolicy",
-                TriggerSource = LocalizationTriggerSource.Auto,
+                TriggerSource = ContractsLocalizationTriggerSource.Auto,
                 AllowPolicyBypass = false,
                 RequestedSnapshotId = snapshot.SnapshotId
             };
@@ -144,13 +173,13 @@ namespace Integrated.Runtime
             {
                 while (_requestChannel.Reader.TryRead(out var request))
                 {
-                    AnalysisSnapshot? snapshot = ResolveSnapshot(request);
+                    ContractsAnalysisSnapshot? snapshot = ResolveSnapshot(request);
                     if (snapshot is null)
                     {
                         continue;
                     }
 
-                    var row = LocalizationRow.FromSnapshot(snapshot);
+                    var row = ContractsLocalizationRow.FromSnapshot(snapshot);
                     var result = await _pipeline.RunAsync(row, cancellationToken).ConfigureAwait(false);
 
                     var enriched = result with
@@ -170,7 +199,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private AnalysisSnapshot? ResolveSnapshot(LocalizationRequest request)
+        private ContractsAnalysisSnapshot? ResolveSnapshot(ContractsLocalizationRequest request)
         {
             lock (_snapshotLock)
             {
@@ -188,12 +217,30 @@ namespace Integrated.Runtime
             }
         }
 
-        private void EnqueueRequest(LocalizationRequest request)
+        private void EnqueueRequest(ContractsLocalizationRequest request)
         {
             while (!_requestChannel.Writer.TryWrite(request))
             {
                 _requestChannel.Reader.TryRead(out _);
             }
+        }
+
+        private void EnqueueWorkerRequest(LocalizationRequest request)
+        {
+            while (!_workerChannel.Writer.TryWrite(request))
+            {
+                _workerChannel.Reader.TryRead(out _);
+            }
+        }
+
+        private static Channel<LocalizationRequest> CreateWorkerChannel(int capacity = 4)
+        {
+            return Channel.CreateBounded<LocalizationRequest>(new BoundedChannelOptions(capacity)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = false,
+                SingleWriter = false
+            });
         }
 
         private static IDictionary<string, string>? MergeDiagnostics(

@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Integrated.Contracts;
 using Integrated.Runtime;
+using ContractsLocalizationRow = Integrated.Contracts.LocalizationRow;
+using RuntimeLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
 namespace Listen_N.Tests
@@ -95,6 +98,29 @@ namespace Listen_N.Tests
             Assert.Equal(2.0f, pipeline.ProcessedRows[0].Duration);
         }
 
+        [Fact]
+        public async Task ManualTriggerReturnsProbeRequest()
+        {
+            var bridge = LocalizationChannelBridge.Create();
+            var pipeline = new FakePipeline();
+            var workerChannel = Channel.CreateBounded<RuntimeLocalizationRequest>(1);
+            var episodePolicy = new LocalizationEpisodePolicy();
+            var orchestrator = new LocalizationOrchestratorService(
+                bridge.Snapshots.Reader,
+                bridge.Requests,
+                new DefaultLocalizationTriggerPolicy(),
+                pipeline,
+                episodePolicy,
+                workerChannel);
+
+            var request = await orchestrator.TriggerNowAsync("ManualProbe");
+
+            Assert.NotNull(request);
+            Assert.NotEqual(Guid.Empty, request.EpisodeId);
+            Assert.True(request.IsProbe);
+            Assert.Equal(15, request.Row.Channels.Count);
+        }
+
         private static async Task AwaitOrchestratorStopAsync(Task runTask)
         {
             try
@@ -134,9 +160,9 @@ namespace Listen_N.Tests
 
         private sealed class FakePipeline : ILocalizationPipeline
         {
-            public List<LocalizationRow> ProcessedRows { get; } = new();
+            public List<ContractsLocalizationRow> ProcessedRows { get; } = new();
 
-            public Task<LocalizationResult> RunAsync(LocalizationRow row, CancellationToken cancellationToken)
+            public Task<LocalizationResult> RunAsync(ContractsLocalizationRow row, CancellationToken cancellationToken)
             {
                 ProcessedRows.Add(row);
                 return Task.FromResult(new LocalizationResult

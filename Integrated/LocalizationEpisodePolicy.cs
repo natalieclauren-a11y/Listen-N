@@ -335,6 +335,20 @@ namespace Integrated.Runtime
             }
         }
 
+        internal LocalizationRequest BuildManualProbeRequest()
+        {
+            if (!_episodeActive)
+            {
+                StartManualEpisode(DateTimeOffset.UtcNow);
+            }
+
+            var request = BuildRequest(isProbe: true);
+            _probePending = true;
+            _countsAtLastRequest = _accumTotalCounts;
+            EmitStatus(LocalizationStatusCodes.ProbeRequested, _episodeId, "Manual probe requested.");
+            return request;
+        }
+
         private LocalizationRequest BuildRequest(bool isProbe)
         {
             var channels = new double[_accumCounts.Length];
@@ -374,6 +388,29 @@ namespace Integrated.Runtime
             _countsAtLastRequest = 0;
 
             EmitStatus(LocalizationStatusCodes.EpisodeStarted, _episodeId, "Confusion debounce satisfied.");
+        }
+
+        private void StartManualEpisode(DateTimeOffset episodeStart)
+        {
+            _episodeId = Guid.NewGuid();
+            _episodeStartUtc = episodeStart;
+            _episodeCurrentEndUtc = episodeStart;
+            _accumDuration = 0;
+            _accumTotalCounts = 0;
+            Array.Clear(_accumCounts, 0, _accumCounts.Length);
+            _episodeActive = true;
+            _confusedStreak = 0;
+            _recoveryStreak = 0;
+            _pendingDuration = 0;
+            _pendingTotalCounts = 0;
+            Array.Clear(_pendingCounts, 0, _pendingCounts.Length);
+            _publishCandidate = false;
+            _probePending = false;
+            _finalRequested = false;
+            _finalPending = false;
+            _countsAtLastRequest = 0;
+
+            EmitStatus(LocalizationStatusCodes.EpisodeStarted, _episodeId, "Manual episode started.");
         }
 
         private void ResetEpisode()
