@@ -9,6 +9,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <BaseOutputPath>bin\Debug</BaseOutputPath>
     <ProduceReferenceAssembly>True</ProduceReferenceAssembly>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
   </PropertyGroup>
 
   <ItemGroup>
