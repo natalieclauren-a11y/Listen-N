@@ -133,6 +133,138 @@ namespace Listen_N.Tests
             Assert.True(requests[1].IsProbe);
         }
 
+        [Fact]
+        public void SingleStabilizesAndPublishesBeforeHardStop()
+        {
+            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            {
+                ConfuseDebounceWindows = 1,
+                RecoverDebounceWindows = 2,
+                CheckEveryCounts = 1,
+                StabilityK = 2,
+                StabilityToleranceCm = 5.0,
+                PublishProbabilityMin = 0.80
+            });
+
+            LocalizationPublishResult? published = null;
+            policy.OnPublish += result => published = result;
+
+            var request = CreateProbeRequest(policy, durationSeconds: 30.0, countsPerChannel: 2000);
+            var prediction = new LocalizationPrediction
+            {
+                IsOutOfDistribution = false,
+                MahalanobisDistance = 0.1,
+                ClassifierProbability = 0.9,
+                Label = "Single",
+                PredictedVector = new[] { 0.0, 0.0, 0.0 }
+            };
+
+            policy.OnMlResult(request, prediction);
+            policy.OnMlResult(request, prediction with { PredictedVector = new[] { 0.5, 0.5, 0.5 } });
+            policy.OnMlResult(request, prediction with { PredictedVector = new[] { 0.8, 0.8, 0.8 } });
+
+            Assert.NotNull(published);
+            Assert.False(policy.IsEpisodeActive);
+            Assert.False(published!.LowStatistics);
+        }
+
+        [Fact]
+        public void DualOrderingSwapMaintainsStability()
+        {
+            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            {
+                ConfuseDebounceWindows = 1,
+                RecoverDebounceWindows = 2,
+                CheckEveryCounts = 1,
+                StabilityK = 1,
+                StabilityToleranceCm = 5.0,
+                PublishProbabilityMin = 0.80
+            });
+
+            LocalizationPublishResult? published = null;
+            policy.OnPublish += result => published = result;
+
+            var request = CreateProbeRequest(policy, durationSeconds: 30.0, countsPerChannel: 3000);
+            var prediction = new LocalizationPrediction
+            {
+                IsOutOfDistribution = false,
+                MahalanobisDistance = 0.1,
+                ClassifierProbability = 0.9,
+                Label = "Dual",
+                PredictedVector = new[] { 0.0, 0.0, 0.0, 10.0, 0.0, 0.0 }
+            };
+
+            policy.OnMlResult(request, prediction);
+            policy.OnMlResult(request, prediction with { PredictedVector = new[] { 10.0, 0.0, 0.0, 0.0, 0.0, 0.0 } });
+
+            Assert.NotNull(published);
+            Assert.False(policy.IsEpisodeActive);
+        }
+
+        [Fact]
+        public void OscillatingPredictionsDoNotPublishUntilStable()
+        {
+            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            {
+                ConfuseDebounceWindows = 1,
+                RecoverDebounceWindows = 2,
+                CheckEveryCounts = 1,
+                StabilityK = 2,
+                StabilityToleranceCm = 5.0,
+                PublishProbabilityMin = 0.80
+            });
+
+            LocalizationPublishResult? published = null;
+            policy.OnPublish += result => published = result;
+
+            var request = CreateProbeRequest(policy, durationSeconds: 30.0, countsPerChannel: 2000);
+            var prediction = new LocalizationPrediction
+            {
+                IsOutOfDistribution = false,
+                MahalanobisDistance = 0.1,
+                ClassifierProbability = 0.9,
+                Label = "Single",
+                PredictedVector = new[] { 0.0, 0.0, 0.0 }
+            };
+
+            policy.OnMlResult(request, prediction);
+            policy.OnMlResult(request, prediction with { PredictedVector = new[] { 100.0, 0.0, 0.0 } });
+            policy.OnMlResult(request, prediction with { PredictedVector = new[] { 0.0, 0.0, 0.0 } });
+            policy.OnMlResult(request, prediction with { PredictedVector = new[] { 100.0, 0.0, 0.0 } });
+
+            Assert.Null(published);
+            Assert.True(policy.IsEpisodeActive);
+        }
+
+        [Fact]
+        public void OodAtHardStopPublishesRefusalAndResets()
+        {
+            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            {
+                ConfuseDebounceWindows = 1,
+                RecoverDebounceWindows = 2,
+                MaxPublishDurationSeconds = 60.0
+            });
+
+            LocalizationPublishResult? published = null;
+            policy.OnPublish += result => published = result;
+
+            var request = CreateFinalRequest(policy, durationSeconds: 60.0, countsPerChannel: 2000);
+            policy.OnMlResult(request, new LocalizationPrediction
+            {
+                IsOutOfDistribution = true,
+                MahalanobisDistance = 5.0,
+                ClassifierProbability = 0.1,
+                Label = "Single",
+                PredictedVector = new[] { 1.0, 2.0, 3.0 }
+            });
+
+            Assert.NotNull(published);
+            Assert.True(published!.IsOod);
+            Assert.Equal("OOD at max duration", published.Reason);
+            Assert.False(policy.IsEpisodeActive);
+        }
+
         private static RtWindowSummary BuildWindow(string state, double durationSeconds, double countsPerChannel, DateTimeOffset start)
         {
             var counts = new double[15];
@@ -152,6 +284,32 @@ namespace Listen_N.Tests
                 QualityScalar = 10.0,
                 IsConfusedCandidate = false
             };
+        }
+
+        private static RuntimeLocalizationRequest CreateProbeRequest(LocalizationEpisodePolicy policy, double durationSeconds, double countsPerChannel)
+        {
+            var requests = new List<RuntimeLocalizationRequest>();
+            policy.OnRequestMl += request => requests.Add(request);
+
+            var start = DateTimeOffset.UtcNow;
+            policy.AddWindow(BuildWindow("Hold", durationSeconds, countsPerChannel, start));
+
+            Assert.Single(requests);
+            Assert.True(requests[0].IsProbe);
+            return requests[0];
+        }
+
+        private static RuntimeLocalizationRequest CreateFinalRequest(LocalizationEpisodePolicy policy, double durationSeconds, double countsPerChannel)
+        {
+            var requests = new List<RuntimeLocalizationRequest>();
+            policy.OnRequestMl += request => requests.Add(request);
+
+            var start = DateTimeOffset.UtcNow;
+            policy.AddWindow(BuildWindow("Hold", durationSeconds, countsPerChannel, start));
+
+            Assert.Single(requests);
+            Assert.False(requests[0].IsProbe);
+            return requests[0];
         }
     }
 }
