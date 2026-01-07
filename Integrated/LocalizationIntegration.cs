@@ -117,7 +117,7 @@ namespace Integrated.Runtime
         public Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null)
         {
             var request = _episodePolicy.BuildManualProbeRequest();
-            EnqueueWorkerRequest(request);
+            
 
             var contractRequest = new ContractsLocalizationRequest
             {
