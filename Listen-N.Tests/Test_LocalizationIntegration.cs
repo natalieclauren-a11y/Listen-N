@@ -121,16 +121,18 @@ namespace Listen_N.Tests
             Assert.Equal(15, request.Row.Channels.Count);
         }
 
-        private static async Task AwaitOrchestratorStopAsync(Task runTask)
+        private static async Task AwaitOrchestratorStopAsync(Task runTask, int timeoutMs = 2000)
         {
-            try
+            var completed = await Task.WhenAny(runTask, Task.Delay(timeoutMs));
+            if (completed != runTask)
             {
-                await runTask;
+                throw new TimeoutException("Orchestrator did not stop within timeout.");
             }
-            catch (OperationCanceledException)
-            {
-            }
+
+            try { await runTask; }
+            catch (OperationCanceledException) { }
         }
+
 
         private static AnalysisSnapshot CreateSnapshot(string state, int totalCounts = 10, double zy = 0.5, double windowSeconds = 0.5)
         {
