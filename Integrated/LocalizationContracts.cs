@@ -148,6 +148,6 @@ namespace Integrated.Contracts
 
     public interface ILocalizationTrigger
     {
-        System.Threading.Tasks.Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? metadata = null);
+        System.Threading.Tasks.Task<Integrated.Runtime.LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null);
     }
 }

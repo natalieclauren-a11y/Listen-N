@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Integrated.Contracts;
 using Integrated.Runtime;
+using RuntimeLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
 namespace Listen_N.Tests
@@ -69,7 +70,7 @@ namespace Listen_N.Tests
                 MaxPublishDurationSeconds = 60.0
             });
 
-            var requests = new List<LocalizationRequest>();
+            var requests = new List<RuntimeLocalizationRequest>();
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;
@@ -104,7 +105,7 @@ namespace Listen_N.Tests
                 CheckEveryCounts = 200
             });
 
-            var requests = new List<LocalizationRequest>();
+            var requests = new List<RuntimeLocalizationRequest>();
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;
