@@ -26,6 +26,12 @@
 
   <ItemGroup>
      <Compile Remove="Listen-N.Tests\**\*.cs" />
+     <Compile Remove="Localization.ML\**\*.cs" />
+     <Compile Remove="Localization.Train\**\*.cs" />
+     <Compile Remove="Localization.Eval\**\*.cs" />
+     <Compile Remove="Localization.ML.Tests\**\*.cs" />
+     <Compile Remove="**\obj\**\*.cs" />
+     <Compile Remove="**\bin\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
