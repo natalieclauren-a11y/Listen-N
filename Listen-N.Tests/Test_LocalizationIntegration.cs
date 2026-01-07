@@ -162,16 +162,23 @@ namespace Listen_N.Tests
         {
             public List<LocalizationRow> ProcessedRows { get; } = new();
 
-            public Task<LocalizationPrediction> RunAsync(LocalizationRow row, CancellationToken ct)
+            public Task<LocalizationResult> RunAsync(LocalizationRow row, CancellationToken ct)
             {
                 ProcessedRows.Add(row);
-                return Task.FromResult(new LocalizationPrediction
+                return Task.FromResult(new LocalizationResult
                 {
-                    IsOutOfDistribution = false,
-                    MahalanobisDistance = 0.0,
-                    ClassifierProbability = 0.0,
-                    Label = string.Empty,
-                    PredictedVector = Array.Empty<double>()
+                    SnapshotId = Guid.Empty,
+                    TimestampUtc = DateTime.UnixEpoch,
+                    TriggerReason = "FakePipeline",
+                    TriggerSource = LocalizationTriggerSource.Manual,
+                    PredictedLabel = "Test",
+                    Confidence = 0.5f,
+                    Ood = false,
+                    Mahalanobis = 0.0f,
+                    Diagnostics = new Dictionary<string, string>
+                    {
+                        ["model"] = "fake"
+                    }
                 });
             }
         }
