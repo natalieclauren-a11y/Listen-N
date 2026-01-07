@@ -1,0 +1,5 @@
+<Project>
+  <Target Name="WarnSummaryTip" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+    <Message Importance="Low" Text="Tip: to list warnings by project, run: dotnet build Listen-N.sln -v:minimal /p:TreatWarningsAsErrors=false" />
+  </Target>
+</Project>
