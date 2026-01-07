@@ -27,6 +27,18 @@ namespace Integrated.Contracts
         string SchemaHash,
         IDictionary<string, string>? Diagnostics);
 
+    public sealed record RtWindowSummary
+    {
+        public required DateTimeOffset WindowStartUtc { get; init; }
+        public required DateTimeOffset WindowEndUtc { get; init; }
+        public required double DurationSeconds { get; init; }
+        public required double[] Counts15 { get; init; }
+        public required string RtState { get; init; }
+        public required double RateTotalCps { get; init; }
+        public required double QualityScalar { get; init; }
+        public bool IsConfusedCandidate { get; init; }
+    }
+
     public record LocalizationRow
     {
         public required float Duration { get; init; }
