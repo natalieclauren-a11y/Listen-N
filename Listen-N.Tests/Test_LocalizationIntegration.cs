@@ -5,7 +5,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Integrated.Contracts;
 using Integrated.Runtime;
-using ContractsLocalizationRow = Integrated.Contracts.LocalizationRow;
+using LocalizationRow = Integrated.Contracts.LocalizationRow;
 using RuntimeLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
@@ -160,18 +160,18 @@ namespace Listen_N.Tests
 
         private sealed class FakePipeline : ILocalizationPipeline
         {
-            public List<ContractsLocalizationRow> ProcessedRows { get; } = new();
+            public List<LocalizationRow> ProcessedRows { get; } = new();
 
-            public Task<LocalizationResult> RunAsync(ContractsLocalizationRow row, CancellationToken cancellationToken)
+            public Task<LocalizationPrediction> RunAsync(LocalizationRow row, CancellationToken ct)
             {
                 ProcessedRows.Add(row);
-                return Task.FromResult(new LocalizationResult
+                return Task.FromResult(new LocalizationPrediction
                 {
-                    SnapshotId = Guid.Empty,
-                    TimestampUtc = DateTime.UtcNow,
-                    TriggerReason = string.Empty,
-                    TriggerSource = LocalizationTriggerSource.Auto,
-                    Forced = false
+                    IsOutOfDistribution = false,
+                    MahalanobisDistance = 0.0,
+                    ClassifierProbability = 0.0,
+                    Label = string.Empty,
+                    PredictedVector = Array.Empty<double>()
                 });
             }
         }
