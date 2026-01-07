@@ -367,13 +367,34 @@ namespace Listen_N
         }
 
         public void ForceStep(long nowUs)
+{
+    // Make sure detections are drained (same as ProcessSteps would do)
+    DrainInbound();
+
+    InitializeNextStep();
+    if (_nextStepUs == 0) return;
+
+    // FORCE: if caller asks for an analysis time before the scheduled tick,
+    // run analysis at nowUs anyway (this is what tests and diagnostics expect).
+    if (nowUs < _nextStepUs)
+    {
+        Step(nowUs); // calls RunAnalysis + advances _nextStepUs
+    }
+    else
+    {
+        // Normal stepping behavior
+        while (_nextStepUs != 0 && nowUs >= _nextStepUs)
         {
-            ProcessSteps(nowUs);
-            if (!_startWorker)
-            {
-                Console.WriteLine($"ForceStep: events={DebugEventCount}, bins_with_counts={DebugBinsWithCounts}");
-            }
+            Step(_nextStepUs);
         }
+    }
+
+    if (!_startWorker)
+    {
+        Console.WriteLine($"ForceStep: events={DebugEventCount}, bins_with_counts={DebugBinsWithCounts}");
+    }
+}
+
 
         // Compute adaptive step size for sliding window
         private double StepSizeSec()
@@ -1367,3 +1388,4 @@ namespace Listen_N
         }
     }
 }
+
