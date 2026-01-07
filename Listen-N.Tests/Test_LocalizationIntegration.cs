@@ -21,14 +21,16 @@ namespace Listen_N.Tests
                 new DefaultLocalizationTriggerPolicy(),
                 pipeline);
 
-            var runTask = orchestrator.RunAsync(CancellationToken.None);
+            using var cts = new CancellationTokenSource();
+            var runTask = orchestrator.RunAsync(cts.Token);
 
-            var snapshot = CreateSnapshot(state: "Hold");
+            var snapshot = CreateSnapshot(state: "Hold", totalCounts: 50, zy: 2.5);
             await bridge.Snapshots.Writer.WriteAsync(snapshot);
             bridge.Snapshots.Writer.Complete();
             bridge.Requests.Writer.Complete();
+            cts.CancelAfter(TimeSpan.FromSeconds(1));
 
-            await runTask;
+            await AwaitOrchestratorStopAsync(runTask);
 
             Assert.Empty(pipeline.ProcessedRows);
         }
@@ -44,7 +46,7 @@ namespace Listen_N.Tests
                 new DefaultLocalizationTriggerPolicy(),
                 pipeline);
 
-            var cts = new CancellationTokenSource();
+            using var cts = new CancellationTokenSource();
             var runTask = orchestrator.RunAsync(cts.Token);
 
             var snapshot = CreateSnapshot(state: "Hold", totalCounts: 50, zy: 2.5);
@@ -56,13 +58,7 @@ namespace Listen_N.Tests
             bridge.Requests.Writer.Complete();
             cts.CancelAfter(TimeSpan.FromSeconds(1));
 
-            try
-            {
-                await runTask;
-            }
-            catch (OperationCanceledException)
-            {
-            }
+            await AwaitOrchestratorStopAsync(runTask);
 
             Assert.Single(pipeline.ProcessedRows);
         }
@@ -78,7 +74,8 @@ namespace Listen_N.Tests
                 new DefaultLocalizationTriggerPolicy(),
                 pipeline);
 
-            var runTask = orchestrator.RunAsync(CancellationToken.None);
+            using var cts = new CancellationTokenSource();
+            var runTask = orchestrator.RunAsync(cts.Token);
 
             var olderSnapshot = CreateSnapshot(state: "Track", totalCounts: 50, zy: 2.5, windowSeconds: 1.0);
             var newerSnapshot = CreateSnapshot(state: "Track", totalCounts: 60, zy: 3.0, windowSeconds: 2.0);
@@ -90,11 +87,23 @@ namespace Listen_N.Tests
 
             bridge.Snapshots.Writer.Complete();
             bridge.Requests.Writer.Complete();
+            cts.CancelAfter(TimeSpan.FromSeconds(1));
 
-            await runTask;
+            await AwaitOrchestratorStopAsync(runTask);
 
             Assert.Single(pipeline.ProcessedRows);
             Assert.Equal(2.0f, pipeline.ProcessedRows[0].Duration);
+        }
+
+        private static async Task AwaitOrchestratorStopAsync(Task runTask)
+        {
+            try
+            {
+                await runTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
 
         private static AnalysisSnapshot CreateSnapshot(string state, int totalCounts = 10, double zy = 0.5, double windowSeconds = 0.5)
@@ -113,7 +122,7 @@ namespace Listen_N.Tests
                 FsmState: state,
                 SelectedGateMicroseconds: 10,
                 Y: 0.0,
-                SigmaY: 0.0,
+                SigmaY: 1.0,
                 Zy: zy,
                 ChangeDetected: false,
                 HoldLike: state.Equals("Hold", StringComparison.OrdinalIgnoreCase),
