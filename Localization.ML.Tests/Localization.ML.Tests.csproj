@@ -18,5 +18,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\\Localization.ML\\Localization.ML.csproj" />
+    <ProjectReference Include="..\\Localization.Train\\Localization.Train.csproj" />
   </ItemGroup>
 </Project>
