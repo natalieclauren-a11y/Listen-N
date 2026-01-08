@@ -253,7 +253,7 @@ internal static class TriggerThresholdHelper
         if (dualColumns is not null)
         {
             var truePair = TryReadDualCoords(row, dualColumns.True);
-            if (truePair.HasValue)
+            if (truePair is not null)
             {
                 return SourceLabel.Dual;
             }
@@ -282,7 +282,7 @@ internal static class TriggerThresholdHelper
 
     private static bool TryResolveCoords(Dictionary<string, int> headerMap, string[] names, out CoordColumns coords)
     {
-        coords = default;
+        coords = null!;
         if (!headerMap.TryGetValue(names[0], out var x)
             || !headerMap.TryGetValue(names[1], out var y)
             || !headerMap.TryGetValue(names[2], out var z))

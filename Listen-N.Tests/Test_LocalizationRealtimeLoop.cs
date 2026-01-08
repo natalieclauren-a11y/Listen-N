@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Integrated.Contracts;
 using Integrated.Runtime;
 using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using RtILocalizer = Integrated.Runtime.ILocalizer;
@@ -35,32 +36,51 @@ namespace Listen_N.Tests
             policy.OnPublish += result => publishTcs.TrySetResult(result);
 
             using var cts = new CancellationTokenSource();
-            worker.Start(cts.Token);
+            var runTask = worker.Start(cts.Token);
 
             var start = DateTimeOffset.UtcNow;
-            for (int i = 0; i < 10 && !publishTcs.Task.IsCompleted; i++)
+            try
             {
-                var summary = new RtWindowSummary
+                for (int i = 0; i < 10 && !publishTcs.Task.IsCompleted; i++)
                 {
-                    WindowStartUtc = start.AddSeconds(i * 2),
-                    WindowEndUtc = start.AddSeconds((i + 1) * 2),
-                    DurationSeconds = 2.0,
-                    Counts15 = Enumerable.Repeat(6000.0, 15).ToArray(),
-                    RtState = "Hold",
-                    RateTotalCps = 45000.0,
-                    QualityScalar = 1.0,
-                    IsConfusedCandidate = true
-                };
+                    var summary = new RtWindowSummary
+                    {
+                        WindowStartUtc = start.AddSeconds(i * 2),
+                        WindowEndUtc = start.AddSeconds((i + 1) * 2),
+                        DurationSeconds = 2.0,
+                        Counts15 = Enumerable.Repeat(6000.0, 15).ToArray(),
+                        RtState = "Hold",
+                        RateTotalCps = 45000.0,
+                        QualityScalar = 1.0,
+                        IsConfusedCandidate = true
+                    };
 
-                policy.AddWindow(summary);
-                await Task.Delay(10);
+                    policy.AddWindow(summary);
+                    await Task.Delay(10);
+                }
+
+                var completed = await Task.WhenAny(publishTcs.Task, Task.Delay(2000));
+                Assert.Equal(publishTcs.Task, completed);
+                var publish = await publishTcs.Task;
+                Assert.False(publish.LowStatistics);
+                Assert.Equal("Single", publish.Label);
             }
+            finally
+            {
+                cts.Cancel();
+                await AwaitStopAsync(runTask);
+            }
+        }
 
-            var completed = await Task.WhenAny(publishTcs.Task, Task.Delay(2000));
-            Assert.Equal(publishTcs.Task, completed);
-            var publish = await publishTcs.Task;
-            Assert.False(publish.LowStatistics);
-            Assert.Equal("Single", publish.Label);
+        private static async Task AwaitStopAsync(Task runTask)
+        {
+            try
+            {
+                await runTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
 
         private sealed class StableLocalizer : RtILocalizer

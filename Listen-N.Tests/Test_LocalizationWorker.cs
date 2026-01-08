@@ -16,7 +16,7 @@ namespace Listen_N.Tests
     public sealed class LocalizationWorkerTests
     {
         [Fact]
-        public void EnqueueDoesNotBlockWhenQueueIsFull()
+        public async Task EnqueueDoesNotBlockWhenQueueIsFull()
         {
             var localizer = new FakeLocalizer();
             var worker = new LocalizationWorker(localizer, capacity: 1);
@@ -25,7 +25,8 @@ namespace Listen_N.Tests
 
             var enqueueTask = Task.Run(() => worker.Enqueue(CreateRequest(isProbe: true)));
 
-            Assert.True(enqueueTask.Wait(TimeSpan.FromSeconds(1)));
+            var completed = await Task.WhenAny(enqueueTask, Task.Delay(TimeSpan.FromSeconds(1)));
+            Assert.Equal(enqueueTask, completed);
         }
 
         [Fact]
