@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using Integrated.Contracts;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 
 namespace Integrated.Runtime
 {
@@ -201,18 +204,18 @@ namespace Integrated.Runtime
             _stateHistory = new List<string>(_config.ThrashWindowCount);
         }
 
-        public event Action<LocalizationRequest>? OnRequestMl;
+        public event Action<RtLocalizationRequest>? OnRequestMl;
         public event Action<LocalizationStatus>? OnStatus;
         public event Action<LocalizationPublishResult>? OnPublish;
 
         public bool AutoModeEnabled { get; set; } = true;
 
-        internal bool IsEpisodeActive => _episodeActive;
-        internal double AccumulatedCountsTotal => _accumTotalCounts;
-        internal double AccumulatedDurationSeconds => _accumDuration;
-        internal bool LastIsConfused => _lastIsConfused;
-        internal double LastStabilityDelta => _lastDelta;
-        internal int StableCount => _stableCount;
+        public bool IsEpisodeActive => _episodeActive;
+        public double AccumulatedCountsTotal => _accumTotalCounts;
+        public double AccumulatedDurationSeconds => _accumDuration;
+        public bool LastIsConfused => _lastIsConfused;
+        public double LastStabilityDelta => _lastDelta;
+        public int StableCount => _stableCount;
 
         public LocalizationEvaluation? LastEvaluation { get; private set; }
 
@@ -291,7 +294,7 @@ namespace Integrated.Runtime
             }
         }
 
-        public void OnMlResult(LocalizationRequest req, LocalizationPrediction pred)
+        public void OnMlResult(RtLocalizationRequest req, RtLocalizationPrediction pred)
         {
             if (!_episodeActive || req.EpisodeId != _episodeId)
             {
@@ -404,7 +407,7 @@ namespace Integrated.Runtime
             }
         }
 
-        internal LocalizationRequest BuildManualProbeRequest()
+        internal RtLocalizationRequest BuildManualProbeRequest()
         {
             if (!_episodeActive)
             {
@@ -418,7 +421,7 @@ namespace Integrated.Runtime
             return request;
         }
 
-        private LocalizationRequest BuildRequest(bool isProbe)
+        private RtLocalizationRequest BuildRequest(bool isProbe)
         {
             var channels = new double[_accumCounts.Length];
             Array.Copy(_accumCounts, channels, channels.Length);
@@ -588,7 +591,7 @@ namespace Integrated.Runtime
             EmitStatus(LocalizationStatusCodes.TriggerPolicyThresholdsDefaulted, null, "Using default trigger thresholds.");
         }
 
-        private void PublishFinalResult(LocalizationRequest req, LocalizationPrediction pred, double totalCounts, bool countsGateMet)
+        private void PublishFinalResult(RtLocalizationRequest req, RtLocalizationPrediction pred, double totalCounts, bool countsGateMet)
         {
             if (pred.IsOutOfDistribution)
             {
@@ -600,7 +603,7 @@ namespace Integrated.Runtime
             EmitPublishResult(req, pred, totalCounts, lowStatistics, reason: null);
         }
 
-        private void EmitPublishResult(LocalizationRequest req, LocalizationPrediction pred, double totalCounts, bool lowStatistics, string? reason)
+        private void EmitPublishResult(RtLocalizationRequest req, RtLocalizationPrediction pred, double totalCounts, bool lowStatistics, string? reason)
         {
             var coordinates = BuildCoordinates(pred);
             OnPublish?.Invoke(new LocalizationPublishResult
@@ -620,7 +623,7 @@ namespace Integrated.Runtime
             });
         }
 
-        private static IReadOnlyList<double[]> BuildCoordinates(LocalizationPrediction pred)
+        private static IReadOnlyList<double[]> BuildCoordinates(RtLocalizationPrediction pred)
         {
             if (pred.IsOutOfDistribution || pred.PredictedVector is null)
             {
@@ -652,7 +655,7 @@ namespace Integrated.Runtime
             return label.StartsWith("Dual", StringComparison.OrdinalIgnoreCase);
         }
 
-        private void UpdateStabilityTracking(LocalizationPrediction pred)
+        private void UpdateStabilityTracking(RtLocalizationPrediction pred)
         {
             bool isDual = IsDualLabel(pred.Label);
             if (pred.PredictedVector is null)
@@ -695,7 +698,7 @@ namespace Integrated.Runtime
             _lastDelta = double.NaN;
         }
 
-        private void UpdateLastEvaluation(LocalizationRequest req, LocalizationPrediction pred, double totalCounts)
+        private void UpdateLastEvaluation(RtLocalizationRequest req, RtLocalizationPrediction pred, double totalCounts)
         {
             LastEvaluation = new LocalizationEvaluation
             {
@@ -712,7 +715,7 @@ namespace Integrated.Runtime
             };
         }
 
-        private bool ShouldPublish(LocalizationPrediction pred)
+        private bool ShouldPublish(RtLocalizationPrediction pred)
         {
             bool earlyStop = _stableCount >= _config.EarlyStopK
                 && IsProbabilityConfident(pred.ClassifierProbability, _config.EarlyStopProbability);

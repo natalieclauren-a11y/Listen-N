@@ -5,6 +5,10 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Integrated.Runtime;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
+using RtILocalizer = Integrated.Runtime.ILocalizer;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
 namespace Listen_N.Tests
@@ -105,9 +109,9 @@ namespace Listen_N.Tests
             }
         }
 
-        private static LocalizationRequest CreateRequest(bool isProbe)
+        private static RtLocalizationRequest CreateRequest(bool isProbe)
         {
-            return new LocalizationRequest
+            return new RtLocalizationRequest
             {
                 EpisodeId = Guid.NewGuid(),
                 IsProbe = isProbe,
@@ -121,14 +125,14 @@ namespace Listen_N.Tests
             };
         }
 
-        private sealed class FakeLocalizer : ILocalizer
+        private sealed class FakeLocalizer : RtILocalizer
         {
-            public ConcurrentQueue<LocalizationRequest> ProcessedRequests { get; } = new();
+            public ConcurrentQueue<RtLocalizationRequest> ProcessedRequests { get; } = new();
 
-            public LocalizationPrediction Predict(LocalizationRequest request)
+            public RtLocalizationPrediction Predict(RtLocalizationRequest request)
             {
                 ProcessedRequests.Enqueue(request);
-                return new LocalizationPrediction
+                return new RtLocalizationPrediction
                 {
                     IsOutOfDistribution = false,
                     MahalanobisDistance = 0.0,

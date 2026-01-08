@@ -5,8 +5,10 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Integrated.Contracts;
 using Integrated.Runtime;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using LocalizationRow = Integrated.Contracts.LocalizationRow;
-using RuntimeLocalizationRequest = Integrated.Runtime.LocalizationRequest;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
 namespace Listen_N.Tests
@@ -103,7 +105,7 @@ namespace Listen_N.Tests
         {
             var bridge = LocalizationChannelBridge.Create();
             var pipeline = new FakePipeline();
-            var workerChannel = Channel.CreateBounded<RuntimeLocalizationRequest>(1);
+            var workerChannel = Channel.CreateBounded<RtLocalizationRequest>(1);
             var episodePolicy = new LocalizationEpisodePolicy();
             var orchestrator = new LocalizationOrchestratorService(
                 bridge.Snapshots.Reader,

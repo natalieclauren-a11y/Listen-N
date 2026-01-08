@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Integrated.Contracts;
 using Integrated.Runtime;
-using RuntimeLocalizationRequest = Integrated.Runtime.LocalizationRequest;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
 namespace Listen_N.Tests
@@ -71,7 +72,7 @@ namespace Listen_N.Tests
                 MaxPublishDurationSeconds = 60.0
             });
 
-            var requests = new List<RuntimeLocalizationRequest>();
+            var requests = new List<RtLocalizationRequest>();
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;
@@ -92,7 +93,7 @@ namespace Listen_N.Tests
             }
             Assert.True(policy.IsEpisodeActive);
 
-            policy.OnMlResult(finalRequest, new LocalizationPrediction
+            policy.OnMlResult(finalRequest, new RtLocalizationPrediction
             {
                 IsOutOfDistribution = false,
                 MahalanobisDistance = 0.1,
@@ -114,7 +115,7 @@ namespace Listen_N.Tests
                 CheckEveryCounts = 200
             });
 
-            var requests = new List<RuntimeLocalizationRequest>();
+            var requests = new List<RtLocalizationRequest>();
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;
@@ -128,7 +129,7 @@ namespace Listen_N.Tests
             policy.AddWindow(BuildWindow("Hold", 10.0, 200, start.AddSeconds(30)));
             Assert.Single(requests);
 
-            policy.OnMlResult(requests[0], new LocalizationPrediction
+            policy.OnMlResult(requests[0], new RtLocalizationPrediction
             {
                 IsOutOfDistribution = false,
                 MahalanobisDistance = 0.2,
@@ -159,7 +160,7 @@ namespace Listen_N.Tests
             policy.OnPublish += result => published = result;
 
             var request = CreateProbeRequest(policy, durationSeconds: 30.0, countsPerChannel: 2000);
-            var prediction = new LocalizationPrediction
+            var prediction = new RtLocalizationPrediction
             {
                 IsOutOfDistribution = false,
                 MahalanobisDistance = 0.1,
@@ -194,7 +195,7 @@ namespace Listen_N.Tests
             policy.OnPublish += result => published = result;
 
             var request = CreateProbeRequest(policy, durationSeconds: 30.0, countsPerChannel: 3000);
-            var prediction = new LocalizationPrediction
+            var prediction = new RtLocalizationPrediction
             {
                 IsOutOfDistribution = false,
                 MahalanobisDistance = 0.1,
@@ -227,7 +228,7 @@ namespace Listen_N.Tests
             policy.OnPublish += result => published = result;
 
             var request = CreateProbeRequest(policy, durationSeconds: 30.0, countsPerChannel: 2000);
-            var prediction = new LocalizationPrediction
+            var prediction = new RtLocalizationPrediction
             {
                 IsOutOfDistribution = false,
                 MahalanobisDistance = 0.1,
@@ -259,7 +260,7 @@ namespace Listen_N.Tests
             policy.OnPublish += result => published = result;
 
             var request = CreateFinalRequest(policy, durationSeconds: 60.0, countsPerChannel: 2000);
-            policy.OnMlResult(request, new LocalizationPrediction
+            policy.OnMlResult(request, new RtLocalizationPrediction
             {
                 IsOutOfDistribution = true,
                 MahalanobisDistance = 5.0,
@@ -295,9 +296,9 @@ namespace Listen_N.Tests
             };
         }
 
-        private static RuntimeLocalizationRequest CreateProbeRequest(LocalizationEpisodePolicy policy, double durationSeconds, double countsPerChannel)
+        private static RtLocalizationRequest CreateProbeRequest(LocalizationEpisodePolicy policy, double durationSeconds, double countsPerChannel)
         {
-            var requests = new List<RuntimeLocalizationRequest>();
+            var requests = new List<RtLocalizationRequest>();
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;
@@ -308,9 +309,9 @@ namespace Listen_N.Tests
             return requests[0];
         }
 
-        private static RuntimeLocalizationRequest CreateFinalRequest(LocalizationEpisodePolicy policy, double durationSeconds, double countsPerChannel)
+        private static RtLocalizationRequest CreateFinalRequest(LocalizationEpisodePolicy policy, double durationSeconds, double countsPerChannel)
         {
-            var requests = new List<RuntimeLocalizationRequest>();
+            var requests = new List<RtLocalizationRequest>();
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;

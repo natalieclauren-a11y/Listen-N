@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 
 namespace Integrated.Contracts
 {
@@ -148,6 +151,6 @@ namespace Integrated.Contracts
 
     public interface ILocalizationTrigger
     {
-        System.Threading.Tasks.Task<Integrated.Runtime.LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null);
+        System.Threading.Tasks.Task<RtLocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null);
     }
 }
