@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Integrated.Contracts;
 using Integrated.Runtime;
 using RuntimeLocalizationRequest = Integrated.Runtime.LocalizationRequest;
@@ -79,11 +80,19 @@ namespace Listen_N.Tests
                 policy.AddWindow(BuildWindow("Hold", 10.0, 1000, start.AddSeconds(i * 10)));
             }
 
-            Assert.Single(requests);
-            Assert.False(requests[0].IsProbe);
+            var finalRequest = Assert.Single(requests, request => !request.IsProbe);
+            Assert.Equal(60.0, finalRequest.Row.DurationSeconds);
+            Assert.NotEqual(Guid.Empty, finalRequest.EpisodeId);
+            Assert.All(requests, request => Assert.Equal(finalRequest.EpisodeId, request.EpisodeId));
+            var probeRequests = requests.Where(request => request.IsProbe).ToList();
+            Assert.True(probeRequests.Count <= 1);
+            if (probeRequests.Count == 1)
+            {
+                Assert.Equal(30.0, probeRequests[0].Row.DurationSeconds);
+            }
             Assert.True(policy.IsEpisodeActive);
 
-            policy.OnMlResult(requests[0], new LocalizationPrediction
+            policy.OnMlResult(finalRequest, new LocalizationPrediction
             {
                 IsOutOfDistribution = false,
                 MahalanobisDistance = 0.1,
