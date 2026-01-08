@@ -37,6 +37,8 @@ using System.Text.Json.Serialization;
 using System.Text.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Integrated.Contracts;
+using Integrated.Runtime;
 
 namespace Listen_N
 {
@@ -114,6 +116,15 @@ namespace Listen_N
 
         private SyntheticDetector? _synthetic;
 
+        private LocalizationEpisodePolicy? _localizationPolicy;
+        private LocalizationWorker? _localizationWorker;
+        private CancellationTokenSource? _localizationWorkerCts;
+        private System.Windows.Forms.Timer? _localizationStatusTimer;
+        private RtWindowSummary? _lastWindowSummary;
+        private LocalizationEvaluation? _lastLocalizationEvaluation;
+        private string? _lastLocalizationStatus;
+        private bool _localizationAutoEnabled = true;
+
 
 
         public ListenN()
@@ -121,6 +132,7 @@ namespace Listen_N
             // Standard WinForms designer initialization
             InitializeComponent();
             this.Load += new EventHandler(Form1_Load); // Make sure combo boxes get populated on load
+            _localizationAutoEnabled = checkBoxLocalizationAuto.Checked;
 
             // ---- Wire up UI interactions ----
             textBoxIpAddress.KeyDown += TextBoxIpAddress_KeyDown;
@@ -183,6 +195,21 @@ namespace Listen_N
             listViewIpAddresses.ContextMenuStrip = contextMenuIpList;
 
             buttonGetRowRatios.Click += buttonGetRowRatios_Click;
+
+            checkBoxLocalizationAuto.CheckedChanged += (s, e) =>
+            {
+                _localizationAutoEnabled = checkBoxLocalizationAuto.Checked;
+                if (_localizationPolicy != null)
+                {
+                    _localizationPolicy.AutoModeEnabled = _localizationAutoEnabled;
+                }
+                AppendMessage(null,
+                    new DebuggingMessage($"Localization auto mode {(_localizationAutoEnabled ? "enabled" : "disabled")}."),
+                    "localization > ");
+                EmitLocalizationStatus(force: true);
+            };
+
+            buttonLocalizeNow.Click += (s, e) => TriggerLocalizationNow();
 
             // Right-click actions on the plot (copy, save, clear)
             contextMenuTubeDistribution.Items.Clear();
@@ -268,6 +295,9 @@ namespace Listen_N
                     if (_adaptive == null)
                     {
                         _adaptive = new AdaptiveWindowEngine(baseDeltaUs: 500, windowStartSec: 2.0);
+
+                        InitializeLocalizationRuntime();
+                        _adaptive.OnWindowSummary += HandleWindowSummary;
 
                         // Start synthetic source
                         _synthetic = new SyntheticDetector(_adaptive);
@@ -1017,6 +1047,180 @@ namespace Listen_N
 
             listViewMessages.Items.Add(item);
             listViewMessages.EnsureVisible(listViewMessages.Items.Count - 1);
+        }
+
+        private void InitializeLocalizationRuntime()
+        {
+            if (_localizationPolicy != null)
+            {
+                return;
+            }
+
+            string artifactsDirectory = Path.Combine(Application.StartupPath, "artifacts");
+            string? policyArtifacts = Directory.Exists(artifactsDirectory) ? artifactsDirectory : null;
+            _localizationPolicy = new LocalizationEpisodePolicy(artifactsDirectory: policyArtifacts)
+            {
+                AutoModeEnabled = _localizationAutoEnabled
+            };
+
+            _localizationPolicy.OnRequestMl += request =>
+            {
+                if (_localizationWorker == null)
+                {
+                    AppendMessage(null, new DebuggingMessage("Localization worker unavailable; request dropped."), "localization > ");
+                    return;
+                }
+
+                _localizationWorker.Enqueue(request);
+            };
+
+            _localizationPolicy.OnStatus += status =>
+            {
+                if (!string.IsNullOrWhiteSpace(status.Code))
+                {
+                    AppendMessage(null,
+                        new DebuggingMessage($"Policy={status.Code} {status.Message}".Trim()),
+                        "localization > ");
+                }
+
+                EmitLocalizationStatus(force: true);
+            };
+
+            _localizationPolicy.OnPublish += result =>
+            {
+                LogLocalizationPublish(result);
+                EmitLocalizationStatus(force: true);
+            };
+
+            if (Directory.Exists(artifactsDirectory))
+            {
+                _localizationWorker = new LocalizationWorker(artifactsDirectory, capacity: 4);
+                _localizationWorker.OnResult += HandleLocalizationResult;
+                _localizationWorkerCts = new CancellationTokenSource();
+                _localizationWorker.Start(_localizationWorkerCts.Token);
+                AppendMessage(null, new DebuggingMessage($"Localization worker started (artifacts: {artifactsDirectory})."), "localization > ");
+            }
+            else
+            {
+                AppendMessage(null, new DebuggingMessage($"Localization artifacts not found at {artifactsDirectory}."), "localization > ");
+            }
+
+            _localizationStatusTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 5000
+            };
+            _localizationStatusTimer.Tick += (s, e) => EmitLocalizationStatus(force: true);
+            _localizationStatusTimer.Start();
+
+            FormClosed += (_, _) =>
+            {
+                _localizationStatusTimer?.Stop();
+                _localizationWorkerCts?.Cancel();
+            };
+        }
+
+        private void HandleWindowSummary(RtWindowSummary summary)
+        {
+            _lastWindowSummary = summary;
+            _localizationPolicy?.AddWindow(summary);
+            EmitLocalizationStatus(force: false);
+        }
+
+        private void HandleLocalizationResult(LocalizationRequest request, LocalizationPrediction prediction)
+        {
+            _localizationPolicy?.OnMlResult(request, prediction);
+            _lastLocalizationEvaluation = _localizationPolicy?.LastEvaluation;
+
+            if (_lastLocalizationEvaluation is not null && request.IsProbe)
+            {
+                LogLocalizationProbe(_lastLocalizationEvaluation);
+            }
+
+            EmitLocalizationStatus(force: true);
+        }
+
+        private void TriggerLocalizationNow()
+        {
+            if (_localizationPolicy == null)
+            {
+                AppendMessage(null, new DebuggingMessage("Localization policy not initialized."), "localization > ");
+                return;
+            }
+
+            if (_localizationWorker == null)
+            {
+                AppendMessage(null, new DebuggingMessage("Localization worker unavailable; cannot run manual probe."), "localization > ");
+                return;
+            }
+
+            var request = _localizationPolicy.BuildManualProbeRequest();
+            _localizationWorker.Enqueue(request);
+            AppendMessage(null, new DebuggingMessage($"Manual probe enqueued for episode {request.EpisodeId}."), "localization > ");
+            EmitLocalizationStatus(force: true);
+        }
+
+        private void LogLocalizationProbe(LocalizationEvaluation evaluation)
+        {
+            string delta = double.IsNaN(evaluation.Delta) ? "n/a" : evaluation.Delta.ToString("F2");
+            AppendMessage(null,
+                new DebuggingMessage(
+                    $"Probe episode={evaluation.EpisodeId} counts={evaluation.TotalCounts:0} duration={evaluation.DurationSeconds:F1}s " +
+                    $"label={evaluation.Label} p={evaluation.Probability:F3} ood={evaluation.IsOod} " +
+                    $"mahal={evaluation.MahalanobisDistance:F2} delta={delta} stable={evaluation.StableCount}"),
+                "localization > ");
+        }
+
+        private void LogLocalizationPublish(LocalizationPublishResult result)
+        {
+            string delta = _localizationPolicy != null && !double.IsNaN(_localizationPolicy.LastStabilityDelta)
+                ? _localizationPolicy.LastStabilityDelta.ToString("F2")
+                : "n/a";
+            int stableCount = _localizationPolicy?.StableCount ?? 0;
+            string reason = string.IsNullOrWhiteSpace(result.Reason) ? "none" : result.Reason;
+            AppendMessage(null,
+                new DebuggingMessage(
+                    $"Publish episode={result.EpisodeId} counts={result.TotalCounts:0} duration={result.DurationSeconds:F1}s " +
+                    $"label={result.Label} p={result.Probability:F3} ood={result.IsOod} " +
+                    $"mahal={result.MahalanobisDistance:F2} delta={delta} stable={stableCount} " +
+                    $"lowStatistics={result.LowStatistics} reason={reason}"),
+                "localization > ");
+        }
+
+        private void EmitLocalizationStatus(bool force)
+        {
+            if (_localizationPolicy == null && _lastWindowSummary == null)
+            {
+                return;
+            }
+
+            string rtState = _lastWindowSummary?.RtState ?? "n/a";
+            double rate = _lastWindowSummary?.RateTotalCps ?? double.NaN;
+            string rateText = double.IsNaN(rate) ? "n/a" : rate.ToString("F1");
+            bool episodeActive = _localizationPolicy?.IsEpisodeActive ?? false;
+            double counts = _localizationPolicy?.AccumulatedCountsTotal ?? 0;
+            double duration = _localizationPolicy?.AccumulatedDurationSeconds ?? 0;
+            bool paused = _localizationAutoEnabled
+                && _localizationPolicy != null
+                && !_localizationPolicy.IsEpisodeActive
+                && !_localizationPolicy.LastIsConfused;
+
+            string mlSummary = "none";
+            if (_lastLocalizationEvaluation is not null)
+            {
+                mlSummary = $"{_lastLocalizationEvaluation.Label} p={_lastLocalizationEvaluation.Probability:F2} " +
+                            $"ood={_lastLocalizationEvaluation.IsOod} mahal={_lastLocalizationEvaluation.MahalanobisDistance:F2}";
+            }
+
+            string status = $"RT={rtState} rate={rateText}cps | EpisodeActive={episodeActive} " +
+                            $"counts={counts:0} duration={duration:F1}s | LastML={mlSummary} | PausedNotConfused={paused}";
+
+            if (!force && string.Equals(status, _lastLocalizationStatus, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastLocalizationStatus = status;
+            AppendMessage(null, new DebuggingMessage(status), "localization > ");
         }
 
         private void UpdateListViewDetectors(object sender, EventArgs e)

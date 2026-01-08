@@ -97,6 +97,8 @@
             numericUpDownSinglesRate = new NumericUpDown();
             numericUpDownCorrelationMetric = new NumericUpDown();
             checkBoxEnableAdaptiveWindowing = new CheckBox();
+            checkBoxLocalizationAuto = new CheckBox();
+            buttonLocalizeNow = new Button();
             listViewRowRatio = new ListView();
             columnHeaderRowRatioDescription = new ColumnHeader();
             columnHeaderRowRatioValue = new ColumnHeader();
@@ -793,6 +795,8 @@
             groupBoxWindow.Controls.Add(label50);
             groupBoxWindow.Controls.Add(groupBox5);
             groupBoxWindow.Controls.Add(groupBox1);
+            groupBoxWindow.Controls.Add(buttonLocalizeNow);
+            groupBoxWindow.Controls.Add(checkBoxLocalizationAuto);
             groupBoxWindow.Controls.Add(checkBoxEnableAdaptiveWindowing);
             groupBoxWindow.Location = new Point(260, 190);
             groupBoxWindow.Name = "groupBoxWindow";
@@ -1028,6 +1032,27 @@
             toolTipEnableAdaptiveWindowing.SetToolTip(checkBoxEnableAdaptiveWindowing, "Enable dynamic adjustment based on event rates or statistics");
             checkBoxEnableAdaptiveWindowing.UseVisualStyleBackColor = true;
             checkBoxEnableAdaptiveWindowing.CheckedChanged += checkBoxEnableAdaptiveWindowing_CheckedChanged;
+            // 
+            // checkBoxLocalizationAuto
+            // 
+            checkBoxLocalizationAuto.AutoSize = true;
+            checkBoxLocalizationAuto.Checked = true;
+            checkBoxLocalizationAuto.CheckState = CheckState.Checked;
+            checkBoxLocalizationAuto.Location = new Point(12, 52);
+            checkBoxLocalizationAuto.Name = "checkBoxLocalizationAuto";
+            checkBoxLocalizationAuto.Size = new Size(101, 19);
+            checkBoxLocalizationAuto.TabIndex = 27;
+            checkBoxLocalizationAuto.Text = "Auto Localize";
+            checkBoxLocalizationAuto.UseVisualStyleBackColor = true;
+            // 
+            // buttonLocalizeNow
+            // 
+            buttonLocalizeNow.Location = new Point(12, 75);
+            buttonLocalizeNow.Name = "buttonLocalizeNow";
+            buttonLocalizeNow.Size = new Size(112, 25);
+            buttonLocalizeNow.TabIndex = 28;
+            buttonLocalizeNow.Text = "Localize Now";
+            buttonLocalizeNow.UseVisualStyleBackColor = true;
             // 
             // listViewRowRatio
             // 
@@ -3434,6 +3459,8 @@
         private ToolStripMenuItem setSaveFolderToolStripMenuItem;
         private GroupBox groupBoxWindow;
         private CheckBox checkBoxEnableAdaptiveWindowing;
+        private CheckBox checkBoxLocalizationAuto;
+        private Button buttonLocalizeNow;
         private ToolTip toolTipEnableAdaptiveWindowing;
         private ToolTip toolTipSlidingTimeWindowDuration;
         private GroupBox groupBox2;
