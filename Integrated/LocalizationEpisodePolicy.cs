@@ -345,6 +345,11 @@ namespace Integrated.Runtime
                 return;
             }
 
+            if (_accumDuration < _config.MinPublishDurationSeconds)
+            {
+                return;
+            }
+
             if (_probePending)
             {
                 return;

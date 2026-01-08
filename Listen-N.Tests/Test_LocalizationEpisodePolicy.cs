@@ -109,14 +109,14 @@ namespace Listen_N.Tests
             policy.OnRequestMl += request => requests.Add(request);
 
             var start = DateTimeOffset.UtcNow;
-            policy.AddWindow(BuildWindow("Hold", 1.0, 50, start));
-            policy.AddWindow(BuildWindow("Hold", 1.0, 100, start.AddSeconds(1)));
-            policy.AddWindow(BuildWindow("Hold", 1.0, 200, start.AddSeconds(2)));
+            policy.AddWindow(BuildWindow("Hold", 10.0, 50, start));
+            policy.AddWindow(BuildWindow("Hold", 10.0, 100, start.AddSeconds(10)));
+            policy.AddWindow(BuildWindow("Hold", 10.0, 200, start.AddSeconds(20)));
 
             Assert.Single(requests);
             Assert.True(requests[0].IsProbe);
 
-            policy.AddWindow(BuildWindow("Hold", 1.0, 200, start.AddSeconds(3)));
+            policy.AddWindow(BuildWindow("Hold", 10.0, 200, start.AddSeconds(30)));
             Assert.Single(requests);
 
             policy.OnMlResult(requests[0], new LocalizationPrediction
@@ -128,7 +128,7 @@ namespace Listen_N.Tests
                 PredictedVector = new[] { 1.0, 2.0, 3.0 }
             });
 
-            policy.AddWindow(BuildWindow("Hold", 1.0, 200, start.AddSeconds(4)));
+            policy.AddWindow(BuildWindow("Hold", 10.0, 200, start.AddSeconds(40)));
             Assert.Equal(2, requests.Count);
             Assert.True(requests[1].IsProbe);
         }
