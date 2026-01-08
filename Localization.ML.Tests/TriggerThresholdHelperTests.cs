@@ -12,45 +12,52 @@ public class TriggerThresholdHelperTests
     [Fact]
     public void ComputeAndWrite_ReconstructsCountsAndSelectsThresholds()
     {
-        using var tempDir = Directory.CreateTempSubdirectory();
-        string csvPath = Path.Combine(tempDir.FullName, "eval.csv");
-        string jsonPath = Path.Combine(tempDir.FullName, "trigger_policy.json");
-
-        var header = string.Join(',', new[]
+        var tempDir = Directory.CreateTempSubdirectory();
+        try
         {
-            "Label",
-            string.Join(',', Enumerable.Range(1, 15).Select(i => $"Channel{i}")),
-            "x","y","z","pred_x","pred_y","pred_z",
-            "x1","y1","z1","x2","y2","z2","pred_x1","pred_y1","pred_z1","pred_x2","pred_y2","pred_z2"
-        });
+            string csvPath = Path.Combine(tempDir.FullName, "eval.csv");
+            string jsonPath = Path.Combine(tempDir.FullName, "trigger_policy.json");
 
-        var rows = new[]
+            var header = string.Join(',', new[]
+            {
+                "Label",
+                string.Join(',', Enumerable.Range(1, 15).Select(i => $"Channel{i}")),
+                "x","y","z","pred_x","pred_y","pred_z",
+                "x1","y1","z1","x2","y2","z2","pred_x1","pred_y1","pred_z1","pred_x2","pred_y2","pred_z2"
+            });
+
+            var rows = new[]
+            {
+                BuildSingleRow(100, 0.3, "Single"),
+                BuildSingleRow(200, 0.2, "Single"),
+                BuildSingleRow(300, 0.1, "Single"),
+                BuildSingleRow(400, 0.05, "Single"),
+                BuildDualRow(150, 0.3, "Dual"),
+                BuildDualRow(350, 0.0, "Dual", swapPredictions: true)
+            };
+
+            File.WriteAllLines(csvPath, new[] { header }.Concat(rows));
+
+            var result = TriggerThresholdHelper.ComputeAndWrite(csvPath, jsonPath, 15.0, 2, 1);
+
+            Assert.Equal(250, result.Output.Nmin_15cm_30s);
+            Assert.Equal(250, result.Output.Nmin_15cm_60s);
+            Assert.False(result.Single.FailureToMeetTarget);
+            Assert.False(result.Dual.FailureToMeetTarget);
+            Assert.Equal(0.0, result.Dual.MedianAtThreshold);
+            Assert.True(File.Exists(jsonPath));
+
+            using var json = JsonDocument.Parse(File.ReadAllText(jsonPath));
+            Assert.Equal(250, json.RootElement.GetProperty("Nmin_15cm_30s").GetInt32());
+            Assert.Equal(250, json.RootElement.GetProperty("Nmin_15cm_60s").GetInt32());
+            Assert.Equal(15.0, json.RootElement.GetProperty("error_target_cm").GetDouble(), 3);
+            Assert.Equal(30.0, json.RootElement.GetProperty("MinPublishDurationSeconds").GetDouble(), 3);
+            Assert.Equal(60.0, json.RootElement.GetProperty("MaxPublishDurationSeconds").GetDouble(), 3);
+        }
+        finally
         {
-            BuildSingleRow(100, 0.3, "Single"),
-            BuildSingleRow(200, 0.2, "Single"),
-            BuildSingleRow(300, 0.1, "Single"),
-            BuildSingleRow(400, 0.05, "Single"),
-            BuildDualRow(150, 0.3, "Dual"),
-            BuildDualRow(350, 0.0, "Dual", swapPredictions: true)
-        };
-
-        File.WriteAllLines(csvPath, new[] { header }.Concat(rows));
-
-        var result = TriggerThresholdHelper.ComputeAndWrite(csvPath, jsonPath, 15.0, 2, 1);
-
-        Assert.Equal(250, result.Output.Nmin_15cm_30s);
-        Assert.Equal(250, result.Output.Nmin_15cm_60s);
-        Assert.False(result.Single.FailureToMeetTarget);
-        Assert.False(result.Dual.FailureToMeetTarget);
-        Assert.Equal(0.0, result.Dual.MedianAtThreshold);
-        Assert.True(File.Exists(jsonPath));
-
-        using var json = JsonDocument.Parse(File.ReadAllText(jsonPath));
-        Assert.Equal(250, json.RootElement.GetProperty("Nmin_15cm_30s").GetInt32());
-        Assert.Equal(250, json.RootElement.GetProperty("Nmin_15cm_60s").GetInt32());
-        Assert.Equal(15.0, json.RootElement.GetProperty("error_target_cm").GetDouble(), 3);
-        Assert.Equal(30.0, json.RootElement.GetProperty("MinPublishDurationSeconds").GetDouble(), 3);
-        Assert.Equal(60.0, json.RootElement.GetProperty("MaxPublishDurationSeconds").GetDouble(), 3);
+            Directory.Delete(tempDir.FullName, true);
+        }
     }
 
     private static string BuildSingleRow(int totalCounts, double predOffsetMeters, string label)

@@ -14,49 +14,70 @@ public sealed class LocalizationArtifactsLoaderTests
     [Fact]
     public void LoaderRejectsMismatchedSchemaHash()
     {
-        using var tempDir = Directory.CreateTempSubdirectory();
-        var artifactsDir = tempDir.FullName;
-        var policyPath = WritePolicy(artifactsDir, thresholds30: 100, thresholds60: 200);
-        WriteMinimalPipelineArtifacts(artifactsDir, out var config, out var runtimeHash);
+        var tempDir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var artifactsDir = tempDir.FullName;
+            var policyPath = WritePolicy(artifactsDir, thresholds30: 100, thresholds60: 200);
+            WriteMinimalPipelineArtifacts(artifactsDir, out var config, out var runtimeHash);
 
-        var manifest = BuildManifest(policyPath, config.SchemaVersion, "bad-hash");
-        WriteManifest(artifactsDir, manifest);
+            var manifest = BuildManifest(policyPath, config.SchemaVersion, "bad-hash");
+            WriteManifest(artifactsDir, manifest);
 
-        var ex = Assert.Throws<LocalizationArtifactsException>(() => LocalizationArtifactsLoader.Load(artifactsDir));
-        Assert.Equal(LocalizationArtifactsFailureReason.SchemaMismatch, ex.Reason);
-        Assert.Equal("bad-hash", ex.ExpectedHash);
-        Assert.Equal(runtimeHash, ex.ActualHash);
+            var ex = Assert.Throws<LocalizationArtifactsException>(() => LocalizationArtifactsLoader.Load(artifactsDir));
+            Assert.Equal(LocalizationArtifactsFailureReason.SchemaMismatch, ex.Reason);
+            Assert.Equal("bad-hash", ex.ExpectedHash);
+            Assert.Equal(runtimeHash, ex.ActualHash);
+        }
+        finally
+        {
+            Directory.Delete(tempDir.FullName, true);
+        }
     }
 
     [Fact]
     public void LoaderRejectsMissingPolicyFile()
     {
-        using var tempDir = Directory.CreateTempSubdirectory();
-        var artifactsDir = tempDir.FullName;
-        WriteMinimalPipelineArtifacts(artifactsDir, out var config, out _);
+        var tempDir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var artifactsDir = tempDir.FullName;
+            WriteMinimalPipelineArtifacts(artifactsDir, out var config, out _);
 
-        var manifest = BuildManifest("trigger_policy.json", config.SchemaVersion, config.SchemaHash);
-        WriteManifest(artifactsDir, manifest);
+            var manifest = BuildManifest("trigger_policy.json", config.SchemaVersion, config.SchemaHash);
+            WriteManifest(artifactsDir, manifest);
 
-        var ex = Assert.Throws<LocalizationArtifactsException>(() => LocalizationArtifactsLoader.Load(artifactsDir));
-        Assert.Equal(LocalizationArtifactsFailureReason.PolicyMissing, ex.Reason);
+            var ex = Assert.Throws<LocalizationArtifactsException>(() => LocalizationArtifactsLoader.Load(artifactsDir));
+            Assert.Equal(LocalizationArtifactsFailureReason.PolicyMissing, ex.Reason);
+        }
+        finally
+        {
+            Directory.Delete(tempDir.FullName, true);
+        }
     }
 
     [Fact]
     public void LoaderAcceptsManifestAndPolicy()
     {
-        using var tempDir = Directory.CreateTempSubdirectory();
-        var artifactsDir = tempDir.FullName;
-        var policyPath = WritePolicy(artifactsDir, thresholds30: 123, thresholds60: 456);
-        WriteMinimalPipelineArtifacts(artifactsDir, out var config, out _);
+        var tempDir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var artifactsDir = tempDir.FullName;
+            var policyPath = WritePolicy(artifactsDir, thresholds30: 123, thresholds60: 456);
+            WriteMinimalPipelineArtifacts(artifactsDir, out var config, out _);
 
-        var manifest = BuildManifest(policyPath, config.SchemaVersion, config.SchemaHash);
-        WriteManifest(artifactsDir, manifest);
+            var manifest = BuildManifest(policyPath, config.SchemaVersion, config.SchemaHash);
+            WriteManifest(artifactsDir, manifest);
 
-        var artifacts = LocalizationArtifactsLoader.Load(artifactsDir);
-        Assert.Equal(123, artifacts.Thresholds.Nmin_15cm_30s);
-        Assert.Equal(456, artifacts.Thresholds.Nmin_15cm_60s);
-        Assert.Equal(config.SchemaHash, artifacts.Manifest.SchemaHash);
+            var artifacts = LocalizationArtifactsLoader.Load(artifactsDir);
+            Assert.Equal(123, artifacts.Thresholds.Nmin_15cm_30s);
+            Assert.Equal(456, artifacts.Thresholds.Nmin_15cm_60s);
+            Assert.Equal(config.SchemaHash, artifacts.Manifest.SchemaHash);
+        }
+        finally
+        {
+            Directory.Delete(tempDir.FullName, true);
+        }
     }
 
     private static void WriteMinimalPipelineArtifacts(string artifactsDir, out PipelineConfiguration config, out string runtimeHash)

@@ -84,7 +84,7 @@ namespace Listen_N
         private int durationInSeconds = 300; // Timed run default (300 s)
 
         // Local folder for COMPUTER storage (NET)
-        private string localSaveDirectory = Path.Combine(Application.StartupPath, "SavedFiles");
+        private string localSaveDirectory = Path.Combine(System.Windows.Forms.Application.StartupPath, "SavedFiles");
 
         // SNM selection (vs1/vs2/vi) shown on Configure tab
         private Snm snm = new Snm();
@@ -1059,7 +1059,7 @@ namespace Listen_N
                 return;
             }
 
-            string artifactsDirectory = Path.Combine(Application.StartupPath, "artifacts");
+            string artifactsDirectory = Path.Combine(System.Windows.Forms.Application.StartupPath, "artifacts");
             LocalizationArtifacts? artifacts = null;
             if (Directory.Exists(artifactsDirectory))
             {
