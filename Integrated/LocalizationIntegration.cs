@@ -114,10 +114,9 @@ namespace Integrated.Runtime
             return Task.WhenAll(consumeSnapshots, processRequests);
         }
 
-        public Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null)
+        public async Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null)
         {
             var request = _episodePolicy.BuildManualProbeRequest();
-            
 
             var contractRequest = new ContractsLocalizationRequest
             {
@@ -127,8 +126,30 @@ namespace Integrated.Runtime
                 Metadata = tags
             };
 
+            AnalysisSnapshot? snapshot = null;
+            for (var attempt = 0; attempt < 50; attempt++)
+            {
+                lock (_snapshotLock)
+                {
+                    snapshot = _latestSnapshot;
+                }
+
+                if (snapshot is not null)
+                {
+                    break;
+                }
+
+                await Task.Delay(5).ConfigureAwait(false);
+            }
+
+            if (snapshot is null)
+            {
+                return request;
+            }
+
+            contractRequest.RequestedSnapshotId = snapshot.SnapshotId;
             EnqueueRequest(contractRequest);
-            return Task.FromResult(request);
+            return request;
         }
 
         private async Task ConsumeSnapshotsAsync(CancellationToken cancellationToken)
@@ -210,7 +231,7 @@ namespace Integrated.Runtime
 
                 if (request.RequestedSnapshotId.HasValue && _latestSnapshot.SnapshotId != request.RequestedSnapshotId.Value)
                 {
-                    return _latestSnapshot;
+                    return null;
                 }
 
                 return _latestSnapshot;
