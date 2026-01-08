@@ -219,16 +219,40 @@ namespace Integrated.Runtime
 
         private void EnqueueRequest(ContractsLocalizationRequest request)
         {
-            while (!_requestChannel.Writer.TryWrite(request))
+            const int maxAttempts = 8;
+
+            for (var attempt = 0; attempt < maxAttempts; attempt++)
             {
+                if (_requestChannel.Writer.TryWrite(request))
+                {
+                    return;
+                }
+
+                if (_requestChannel.Writer.Completion.IsCompleted)
+                {
+                    return;
+                }
+
                 _requestChannel.Reader.TryRead(out _);
             }
         }
 
         private void EnqueueWorkerRequest(LocalizationRequest request)
         {
-            while (!_workerChannel.Writer.TryWrite(request))
+            const int maxAttempts = 8;
+
+            for (var attempt = 0; attempt < maxAttempts; attempt++)
             {
+                if (_workerChannel.Writer.TryWrite(request))
+                {
+                    return;
+                }
+
+                if (_workerChannel.Writer.Completion.IsCompleted)
+                {
+                    return;
+                }
+
                 _workerChannel.Reader.TryRead(out _);
             }
         }
