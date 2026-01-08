@@ -5,17 +5,20 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Localization.ML;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 
 namespace Integrated.Runtime
 {
     public interface ILocalizer
     {
-        LocalizationPrediction Predict(LocalizationRequest request);
+        RtLocalizationPrediction Predict(RtLocalizationRequest request);
     }
 
     public sealed class LocalizationWorker
     {
-        private readonly Channel<LocalizationRequest> _channel;
+        private readonly Channel<RtLocalizationRequest> _channel;
         private readonly ILocalizer _localizer;
         private readonly object _enqueueLock = new();
         private readonly int _capacity;
@@ -36,7 +39,7 @@ namespace Integrated.Runtime
 
             _localizer = localizer ?? throw new ArgumentNullException(nameof(localizer));
             _capacity = capacity;
-            _channel = Channel.CreateBounded<LocalizationRequest>(new BoundedChannelOptions(capacity)
+            _channel = Channel.CreateBounded<RtLocalizationRequest>(new BoundedChannelOptions(capacity)
             {
                 SingleReader = true,
                 SingleWriter = false,
@@ -44,7 +47,7 @@ namespace Integrated.Runtime
             });
         }
 
-        public event Action<LocalizationRequest, LocalizationPrediction>? OnResult;
+        public event Action<RtLocalizationRequest, RtLocalizationPrediction>? OnResult;
 
         public Task Start(CancellationToken cancellationToken)
         {
@@ -57,7 +60,7 @@ namespace Integrated.Runtime
             return _runTask;
         }
 
-        public void Enqueue(LocalizationRequest request)
+        public void Enqueue(RtLocalizationRequest request)
         {
             if (_channel.Writer.TryWrite(request))
             {
@@ -81,7 +84,7 @@ namespace Integrated.Runtime
                     return;
                 }
 
-                var pending = new List<LocalizationRequest>();
+                var pending = new List<RtLocalizationRequest>();
                 while (_channel.Reader.TryRead(out var existing))
                 {
                     pending.Add(existing);
@@ -124,7 +127,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private void Requeue(List<LocalizationRequest> pending)
+        private void Requeue(List<RtLocalizationRequest> pending)
         {
             foreach (var item in pending)
             {
@@ -132,7 +135,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private bool TryInsertProbe(List<LocalizationRequest> pending, LocalizationRequest request)
+        private bool TryInsertProbe(List<RtLocalizationRequest> pending, RtLocalizationRequest request)
         {
             if (pending.Count < _capacity)
             {
@@ -151,7 +154,7 @@ namespace Integrated.Runtime
             return true;
         }
 
-        private void EnsureRoomForFinal(List<LocalizationRequest> pending)
+        private void EnsureRoomForFinal(List<RtLocalizationRequest> pending)
         {
             if (pending.Count < _capacity)
             {
@@ -170,7 +173,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private static int FindOldestProbeIndex(List<LocalizationRequest> pending)
+        private static int FindOldestProbeIndex(List<RtLocalizationRequest> pending)
         {
             for (int i = 0; i < pending.Count; i++)
             {
@@ -197,7 +200,7 @@ namespace Integrated.Runtime
                 _pipeline = LocalizationPipeline.Load(artifactsDirectory);
             }
 
-            public LocalizationPrediction Predict(LocalizationRequest request)
+            public RtLocalizationPrediction Predict(RtLocalizationRequest request)
             {
                 var row = new Localization.ML.LocalizationRow
                 {

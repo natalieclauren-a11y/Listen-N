@@ -4,11 +4,13 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Integrated.Contracts;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using ContractsAnalysisSnapshot = Integrated.Contracts.AnalysisSnapshot;
-using ContractsLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using ContractsLocalizationResult = Integrated.Contracts.LocalizationResult;
 using ContractsLocalizationRow = Integrated.Contracts.LocalizationRow;
 using ContractsLocalizationTriggerSource = Integrated.Contracts.LocalizationTriggerSource;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 
 namespace Integrated.Runtime
 {
@@ -19,14 +21,14 @@ namespace Integrated.Runtime
 
     public sealed class LocalizationChannelBridge
     {
-        public LocalizationChannelBridge(Channel<ContractsAnalysisSnapshot> snapshots, Channel<ContractsLocalizationRequest> requests)
+        public LocalizationChannelBridge(Channel<ContractsAnalysisSnapshot> snapshots, Channel<CnLocalizationRequest> requests)
         {
             Snapshots = snapshots;
             Requests = requests;
         }
 
         public Channel<ContractsAnalysisSnapshot> Snapshots { get; }
-        public Channel<ContractsLocalizationRequest> Requests { get; }
+        public Channel<CnLocalizationRequest> Requests { get; }
 
         public static LocalizationChannelBridge Create(int snapshotCapacity = 1, int requestCapacity = 4)
         {
@@ -37,7 +39,7 @@ namespace Integrated.Runtime
                 SingleWriter = false
             });
 
-            var requests = Channel.CreateBounded<ContractsLocalizationRequest>(new BoundedChannelOptions(requestCapacity)
+            var requests = Channel.CreateBounded<CnLocalizationRequest>(new BoundedChannelOptions(requestCapacity)
             {
                 FullMode = BoundedChannelFullMode.DropOldest,
                 SingleReader = true,
@@ -66,11 +68,11 @@ namespace Integrated.Runtime
     public sealed class LocalizationOrchestratorService : ILocalizationTrigger
     {
         private readonly ChannelReader<ContractsAnalysisSnapshot> _snapshotReader;
-        private readonly Channel<ContractsLocalizationRequest> _requestChannel;
+        private readonly Channel<CnLocalizationRequest> _requestChannel;
         private readonly ILocalizationTriggerPolicy _policy;
         private readonly ILocalizationPipeline _pipeline;
         private readonly LocalizationEpisodePolicy _episodePolicy;
-        private readonly Channel<LocalizationRequest> _workerChannel;
+        private readonly Channel<RtLocalizationRequest> _workerChannel;
 
         private readonly object _snapshotLock = new();
         private AnalysisSnapshot? _latestSnapshot;
@@ -78,7 +80,7 @@ namespace Integrated.Runtime
 
         public LocalizationOrchestratorService(
             ChannelReader<ContractsAnalysisSnapshot> snapshotReader,
-            Channel<ContractsLocalizationRequest> requestChannel,
+            Channel<CnLocalizationRequest> requestChannel,
             ILocalizationTriggerPolicy policy,
             ILocalizationPipeline pipeline)
             : this(
@@ -93,11 +95,11 @@ namespace Integrated.Runtime
 
         public LocalizationOrchestratorService(
             ChannelReader<ContractsAnalysisSnapshot> snapshotReader,
-            Channel<ContractsLocalizationRequest> requestChannel,
+            Channel<CnLocalizationRequest> requestChannel,
             ILocalizationTriggerPolicy policy,
             ILocalizationPipeline pipeline,
             LocalizationEpisodePolicy episodePolicy,
-            Channel<LocalizationRequest> workerChannel)
+            Channel<RtLocalizationRequest> workerChannel)
         {
             _snapshotReader = snapshotReader;
             _requestChannel = requestChannel;
@@ -114,7 +116,7 @@ namespace Integrated.Runtime
             return Task.WhenAll(consumeSnapshots, processRequests);
         }
 
-        public async Task<LocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null)
+        public async Task<RtLocalizationRequest> TriggerNowAsync(string reason, IDictionary<string, string>? tags = null)
         {
             var request = _episodePolicy.BuildManualProbeRequest();
 
@@ -139,7 +141,7 @@ namespace Integrated.Runtime
                 return request;
             }
 
-            var contractRequest = new ContractsLocalizationRequest
+            var contractRequest = new CnLocalizationRequest
             {
                 TriggerReason = reason,
                 TriggerSource = ContractsLocalizationTriggerSource.Manual,
@@ -177,7 +179,7 @@ namespace Integrated.Runtime
 
             _pendingAutoSnapshotId = snapshot.SnapshotId;
 
-            var request = new ContractsLocalizationRequest
+            var request = new CnLocalizationRequest
             {
                 TriggerReason = "AutoPolicy",
                 TriggerSource = ContractsLocalizationTriggerSource.Auto,
@@ -220,7 +222,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private ContractsAnalysisSnapshot? ResolveSnapshot(ContractsLocalizationRequest request)
+        private ContractsAnalysisSnapshot? ResolveSnapshot(CnLocalizationRequest request)
         {
             lock (_snapshotLock)
             {
@@ -238,7 +240,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private void EnqueueRequest(ContractsLocalizationRequest request)
+        private void EnqueueRequest(CnLocalizationRequest request)
         {
             const int maxAttempts = 8;
 
@@ -258,7 +260,7 @@ namespace Integrated.Runtime
             }
         }
 
-        private void EnqueueWorkerRequest(LocalizationRequest request)
+        private void EnqueueWorkerRequest(RtLocalizationRequest request)
         {
             const int maxAttempts = 8;
 
@@ -278,9 +280,9 @@ namespace Integrated.Runtime
             }
         }
 
-        private static Channel<LocalizationRequest> CreateWorkerChannel(int capacity = 4)
+        private static Channel<RtLocalizationRequest> CreateWorkerChannel(int capacity = 4)
         {
-            return Channel.CreateBounded<LocalizationRequest>(new BoundedChannelOptions(capacity)
+            return Channel.CreateBounded<RtLocalizationRequest>(new BoundedChannelOptions(capacity)
             {
                 FullMode = BoundedChannelFullMode.DropOldest,
                 SingleReader = false,

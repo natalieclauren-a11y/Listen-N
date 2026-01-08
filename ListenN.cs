@@ -39,6 +39,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Integrated.Contracts;
 using Integrated.Runtime;
+using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
 using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 
