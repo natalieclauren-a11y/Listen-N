@@ -4,6 +4,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Integrated.Contracts;
 using Integrated.Runtime;
+using RtILocalizer = Integrated.Runtime.ILocalizer;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
 
 namespace Listen_N.Tests
@@ -60,11 +63,11 @@ namespace Listen_N.Tests
             Assert.Equal("Single", publish.Label);
         }
 
-        private sealed class StableLocalizer : ILocalizer
+        private sealed class StableLocalizer : RtILocalizer
         {
-            public LocalizationPrediction Predict(LocalizationRequest request)
+            public RtLocalizationPrediction Predict(RtLocalizationRequest request)
             {
-                return new LocalizationPrediction
+                return new RtLocalizationPrediction
                 {
                     IsOutOfDistribution = false,
                     MahalanobisDistance = 1.0,
