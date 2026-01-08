@@ -1126,7 +1126,9 @@ namespace Listen_N
             EmitLocalizationStatus(force: false);
         }
 
-        private void HandleLocalizationResult(LocalizationRequest request, LocalizationPrediction prediction)
+        private void HandleLocalizationResult(
+            Integrated.Runtime.LocalizationRequest request,
+            Integrated.Runtime.LocalizationPrediction prediction)
         {
             _localizationPolicy?.OnMlResult(request, prediction);
             _lastLocalizationEvaluation = _localizationPolicy?.LastEvaluation;
