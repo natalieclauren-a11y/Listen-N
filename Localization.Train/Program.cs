@@ -99,9 +99,22 @@ internal static class Program
             .ToList();
     }
 
+    private static int[] ParseDurationList(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return Array.Empty<int>();
+        }
+
+        return raw
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(entry => int.Parse(entry.Trim(), CultureInfo.InvariantCulture))
+            .ToArray();
+    }
+
     public static void Main(string[] args)
     {
-        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir, computeTriggerThresholds, evalCsvPath, triggerJsonOut, errorTargetCm, triggerBins, triggerMinSamples) = ParseArgs(args);
+        var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir, computeTriggerThresholds, evalCsvPath, triggerJsonOut, errorTargetCm, triggerBins, triggerMinSamples, emitTriggerPolicy, triggerPolicyOut, triggerPolicyTargetM, triggerPolicyDurations, triggerPolicyBinWidth, triggerPolicyMinSamples, triggerPolicyLabelMode, triggerPolicyNotes) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
         if (computeTriggerThresholds)
@@ -598,7 +611,24 @@ internal static class Program
         pipeline.Save(outputDir);
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
-        WriteManifest(outputDir, config, triggerJsonOut);
+
+        string? triggerPolicyPath = triggerJsonOut;
+        if (emitTriggerPolicy)
+        {
+            string resolvedEvalCsv = ResolveTriggerPolicyEvalCsvPath(evalCsvPath, outputDir);
+            triggerPolicyPath = triggerPolicyOut ?? Path.Combine(outputDir, "trigger_policy.json");
+            TriggerPolicyWriter.ComputeAndWrite(
+                resolvedEvalCsv,
+                triggerPolicyPath,
+                triggerPolicyTargetM,
+                triggerPolicyDurations,
+                triggerPolicyBinWidth,
+                triggerPolicyMinSamples,
+                triggerPolicyNotes,
+                triggerPolicyLabelMode);
+        }
+
+        WriteManifest(outputDir, config, triggerPolicyPath);
         Console.WriteLine($"Artifacts saved to {outputDir}");
         Console.WriteLine($"Artifact schema: SchemaVersion={config.SchemaVersion}, SchemaHash={config.SchemaHash}");
 
@@ -3283,7 +3313,7 @@ internal static class Program
         return r2;
     }
 
-    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitReliabilityFigure, string? ReliabilityFigOutPath, int ReliabilityBinCount, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints, bool EmitOutcomeFigure, string? OutcomeFigOut, string OutcomeFigTitle, double? OutcomeMinSeparationCm, string OutcomeRegime, bool OutcomeOodPassOnly, bool EmitDomainShiftOutcomeCoverageFigure, string? DomainShiftOutcomeCoverageOut, string DomainShiftDataDir, string? DomainShiftSingleFiles, string? DomainShiftDualFiles, string? ArtifactsDir, bool ComputeTriggerThresholds, string? EvalCsvPath, string? TriggerJsonOut, double ErrorTargetCm, int TriggerBins, int TriggerMinSamples) ParseArgs(string[] args)
+    private static (string DataDir, string OutputDir, double? DurationOverride, bool UseGroupedSplit, bool ValidateOod, double OodFaultFraction, int OodSeed, bool RunNegativeControls, int NegativeControlSeed, bool RunPermutationControl, bool RunLabelShuffleControl, bool EmitFeatureSchemaTex, string? TexOutPath, string TexCaption, string TexLabel, bool EmitLockedSchemaTex, string? LockedTexOutPath, string LockedTexCaption, string LockedTexLabel, bool EmitNormalizationFigure, string? NormFigOutPath, string NormFigRegime, double NormFigRoundCm, double NormFigMinCountRatio, int NormFigMaxExamples, string NormFigTitle, bool EmitDescriptorFigure, string? DescFigOutPath, int DescFigBins, string DescFigRegime, string DescFigTitle, bool EmitOodFigure, string? OodFigOutPath, string OodFigTitle, int OodFigBins, int OodFigMaxPoints, string OodFigThresholdMode, double OodFigThresholdK, string OodFigRegime, bool EmitClassifierFigure, string? ClfFigOutPath, string ClfFigTitle, int ClfFigMaxPoints, double ClfFigThreshold, string ClfFigRegime, bool EmitReliabilityFigure, string? ReliabilityFigOutPath, int ReliabilityBinCount, bool EmitSingleErrorFigure, string? SingleErrFigOut, string SingleErrFigTitle, string SingleErrFigRegime, int SingleErrMaxPoints, bool EmitDualErrorFigure, string? DualErrFigOut, string DualErrFigTitle, string DualErrFigRegime, string DualErrErrorMetric, int DualErrMaxPoints, bool EmitOutcomeFigure, string? OutcomeFigOut, string OutcomeFigTitle, double? OutcomeMinSeparationCm, string OutcomeRegime, bool OutcomeOodPassOnly, bool EmitDomainShiftOutcomeCoverageFigure, string? DomainShiftOutcomeCoverageOut, string DomainShiftDataDir, string? DomainShiftSingleFiles, string? DomainShiftDualFiles, string? ArtifactsDir, bool ComputeTriggerThresholds, string? EvalCsvPath, string? TriggerJsonOut, double ErrorTargetCm, int TriggerBins, int TriggerMinSamples, bool EmitTriggerPolicy, string? TriggerPolicyOut, double TriggerPolicyTargetM, int[] TriggerPolicyDurations, int TriggerPolicyBinWidth, int TriggerPolicyMinSamples, string TriggerPolicyLabelMode, string? TriggerPolicyNotes) ParseArgs(string[] args)
     {
         string dataDir = ".";
         string outputDir = "artifacts";
@@ -3363,6 +3393,14 @@ internal static class Program
         double errorTargetCm = 15.0;
         int triggerBins = 20;
         int triggerMinSamples = 200;
+        bool emitTriggerPolicy = false;
+        string? triggerPolicyOut = null;
+        double triggerPolicyTargetM = 0.15;
+        string triggerPolicyDurationsRaw = "30,60";
+        int triggerPolicyBinWidth = 250;
+        int triggerPolicyMinSamples = 20;
+        string triggerPolicyLabelMode = "auto";
+        string? triggerPolicyNotes = null;
 
         foreach (var arg in args)
         {
@@ -3679,6 +3717,38 @@ internal static class Program
             {
                 triggerMinSamples = int.Parse(arg.Substring("--min-samples-per-bin=".Length), CultureInfo.InvariantCulture);
             }
+            else if (arg.StartsWith("--emit-trigger-policy="))
+            {
+                emitTriggerPolicy = bool.Parse(arg.Substring("--emit-trigger-policy=".Length));
+            }
+            else if (arg.StartsWith("--trigger-policy-out="))
+            {
+                triggerPolicyOut = arg.Substring("--trigger-policy-out=".Length);
+            }
+            else if (arg.StartsWith("--trigger-policy-target-m="))
+            {
+                triggerPolicyTargetM = double.Parse(arg.Substring("--trigger-policy-target-m=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--trigger-policy-durations="))
+            {
+                triggerPolicyDurationsRaw = arg.Substring("--trigger-policy-durations=".Length);
+            }
+            else if (arg.StartsWith("--trigger-policy-bin-width="))
+            {
+                triggerPolicyBinWidth = int.Parse(arg.Substring("--trigger-policy-bin-width=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--trigger-policy-min-samples-per-bin="))
+            {
+                triggerPolicyMinSamples = int.Parse(arg.Substring("--trigger-policy-min-samples-per-bin=".Length), CultureInfo.InvariantCulture);
+            }
+            else if (arg.StartsWith("--trigger-policy-label-mode="))
+            {
+                triggerPolicyLabelMode = arg.Substring("--trigger-policy-label-mode=".Length);
+            }
+            else if (arg.StartsWith("--trigger-policy-notes="))
+            {
+                triggerPolicyNotes = arg.Substring("--trigger-policy-notes=".Length);
+            }
         }
 
         runPermutationControl |= runNegativeControls;
@@ -3822,7 +3892,40 @@ internal static class Program
             throw new ArgumentException("--min-samples-per-bin must be positive");
         }
 
-        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir, computeTriggerThresholds, evalCsvPath, triggerJsonOut, errorTargetCm, triggerBins, triggerMinSamples);
+        int[] triggerPolicyDurations = ParseDurationList(triggerPolicyDurationsRaw);
+        if (triggerPolicyDurations.Length == 0)
+        {
+            throw new ArgumentException("--trigger-policy-durations must include at least one duration.");
+        }
+
+        if (triggerPolicyDurations.Any(d => d <= 0))
+        {
+            throw new ArgumentException("--trigger-policy-durations must be positive integers.");
+        }
+
+        if (triggerPolicyTargetM <= 0)
+        {
+            throw new ArgumentException("--trigger-policy-target-m must be positive");
+        }
+
+        if (triggerPolicyBinWidth <= 0)
+        {
+            throw new ArgumentException("--trigger-policy-bin-width must be positive");
+        }
+
+        if (triggerPolicyMinSamples <= 0)
+        {
+            throw new ArgumentException("--trigger-policy-min-samples-per-bin must be positive");
+        }
+
+        if (!string.Equals(triggerPolicyLabelMode, "single", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(triggerPolicyLabelMode, "dual", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(triggerPolicyLabelMode, "auto", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--trigger-policy-label-mode must be one of 'single', 'dual', or 'auto'");
+        }
+
+        return (dataDir, outputDir, duration, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir, computeTriggerThresholds, evalCsvPath, triggerJsonOut, errorTargetCm, triggerBins, triggerMinSamples, emitTriggerPolicy, triggerPolicyOut, triggerPolicyTargetM, triggerPolicyDurations, triggerPolicyBinWidth, triggerPolicyMinSamples, triggerPolicyLabelMode, triggerPolicyNotes);
     }
 
     internal static List<LocalizationRow> LoadSingleGroups(string dataDir, double? durationOverride)
@@ -3982,6 +4085,31 @@ internal static class Program
             .ToList();
 
         return files;
+    }
+
+    private static string ResolveTriggerPolicyEvalCsvPath(string? evalCsvPath, string outputDir)
+    {
+        if (!string.IsNullOrWhiteSpace(evalCsvPath))
+        {
+            return evalCsvPath;
+        }
+
+        var candidates = Directory.EnumerateFiles(outputDir, "*.csv")
+            .Where(path => Path.GetFileNameWithoutExtension(path).Contains("eval", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (candidates.Count == 1)
+        {
+            return candidates[0];
+        }
+
+        if (candidates.Count == 0)
+        {
+            throw new ArgumentException("Trigger policy emission requires --eval-csv when no eval CSV is present in the output directory.");
+        }
+
+        throw new ArgumentException("Multiple eval CSV files found in the output directory; specify --eval-csv explicitly.");
     }
 
     private static void WriteManifest(string outputDir, PipelineConfiguration config, string? triggerPolicyPath)
