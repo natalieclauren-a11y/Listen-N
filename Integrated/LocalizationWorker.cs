@@ -64,9 +64,19 @@ namespace Integrated.Runtime
                 return;
             }
 
+            if (_channel.Reader.Completion.IsCompleted)
+            {
+                return;
+            }
+
             lock (_enqueueLock)
             {
                 if (_channel.Writer.TryWrite(request))
+                {
+                    return;
+                }
+
+                if (_channel.Reader.Completion.IsCompleted)
                 {
                     return;
                 }
