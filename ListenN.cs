@@ -39,6 +39,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Integrated.Contracts;
 using Integrated.Runtime;
+using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
+using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 
 namespace Listen_N
 {
@@ -1127,8 +1129,8 @@ namespace Listen_N
         }
 
         private void HandleLocalizationResult(
-            Integrated.Runtime.LocalizationRequest request,
-            Integrated.Runtime.LocalizationPrediction prediction)
+            RtLocalizationRequest request,
+            RtLocalizationPrediction prediction)
         {
             _localizationPolicy?.OnMlResult(request, prediction);
             _lastLocalizationEvaluation = _localizationPolicy?.LastEvaluation;
