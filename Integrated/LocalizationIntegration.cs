@@ -118,14 +118,6 @@ namespace Integrated.Runtime
         {
             var request = _episodePolicy.BuildManualProbeRequest();
 
-            var contractRequest = new ContractsLocalizationRequest
-            {
-                TriggerReason = reason,
-                TriggerSource = ContractsLocalizationTriggerSource.Manual,
-                AllowPolicyBypass = true,
-                Metadata = tags
-            };
-
             AnalysisSnapshot? snapshot = null;
             for (var attempt = 0; attempt < 50; attempt++)
             {
@@ -147,7 +139,15 @@ namespace Integrated.Runtime
                 return request;
             }
 
-            contractRequest.RequestedSnapshotId = snapshot.SnapshotId;
+            var contractRequest = new ContractsLocalizationRequest
+            {
+                TriggerReason = reason,
+                TriggerSource = ContractsLocalizationTriggerSource.Manual,
+                AllowPolicyBypass = true,
+                Metadata = tags,
+                RequestedSnapshotId = snapshot.SnapshotId
+            };
+
             EnqueueRequest(contractRequest);
             return request;
         }
@@ -249,7 +249,7 @@ namespace Integrated.Runtime
                     return;
                 }
 
-                if (_requestChannel.Writer.Completion.IsCompleted)
+                if (_requestChannel.Reader.Completion.IsCompleted)
                 {
                     return;
                 }
@@ -269,7 +269,7 @@ namespace Integrated.Runtime
                     return;
                 }
 
-                if (_workerChannel.Writer.Completion.IsCompleted)
+                if (_workerChannel.Reader.Completion.IsCompleted)
                 {
                     return;
                 }
