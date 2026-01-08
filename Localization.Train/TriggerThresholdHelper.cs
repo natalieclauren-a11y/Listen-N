@@ -1,27 +1,63 @@
+using System.Collections.Generic;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Localization.Train;
 
-internal static class TriggerThresholdHelper
+internal static class TriggerPolicyWriter
 {
-    private const string NotesText = "Computed from evaluation CSV by quantile-binning TotalCounts and selecting the smallest threshold whose tail median error meets target.";
+    private const int SchemaVersion = 1;
+    private const string MetricDefinition =
+        "Median localization error over the tail set (TotalCounts >= threshold) within each duration bucket. " +
+        "Threshold is the smallest TotalCounts bin edge where tail median error <= target and tail samples >= min_samples_per_bin.";
 
-    internal static TriggerThresholdResult ComputeAndWrite(string evalCsvPath, string triggerJsonOutPath, double errorTargetCm, int bins, int minSamplesPerBin)
+    internal static TriggerPolicyOutput ComputeAndWrite(
+        string evalCsvPath,
+        string outPath,
+        double targetMedianMeters,
+        int[] durationsSeconds,
+        int binWidthCounts,
+        int minSamplesPerBin,
+        string? notes,
+        string labelMode)
     {
         if (string.IsNullOrWhiteSpace(evalCsvPath))
         {
-            throw new ArgumentException("--eval-csv must be provided when computing trigger thresholds.");
+            throw new ArgumentException("Evaluation CSV path is required.");
         }
 
-        if (string.IsNullOrWhiteSpace(triggerJsonOutPath))
+        if (string.IsNullOrWhiteSpace(outPath))
         {
-            throw new ArgumentException("--trigger-json-out must be provided when computing trigger thresholds.");
+            throw new ArgumentException("Output path is required.");
         }
+
+        if (targetMedianMeters <= 0)
+        {
+            throw new ArgumentException("--trigger-policy-target-m must be positive.");
+        }
+
+        if (durationsSeconds is null || durationsSeconds.Length == 0)
+        {
+            throw new ArgumentException("--trigger-policy-durations must contain at least one duration.");
+        }
+
+        if (binWidthCounts <= 0)
+        {
+            throw new ArgumentException("--trigger-policy-bin-width must be positive.");
+        }
+
+        if (minSamplesPerBin <= 0)
+        {
+            throw new ArgumentException("--trigger-policy-min-samples-per-bin must be positive.");
+        }
+
+        var selection = ParseLabelMode(labelMode);
 
         var table = LoadCsvTable(evalCsvPath);
         if (table.Rows.Count == 0)
@@ -29,83 +65,228 @@ internal static class TriggerThresholdHelper
             throw new InvalidOperationException("Evaluation CSV contains no data rows.");
         }
 
+        var durationColumn = ResolveDurationColumn(table, out var durationColumnName);
+        int? inferredDuration = null;
+        if (!durationColumn.HasValue)
+        {
+            inferredDuration = InferDurationFromFilename(evalCsvPath, durationsSeconds);
+        }
+
         var totalCountsColumn = ResolveTotalCountsColumn(table);
         var singleColumns = ResolveSingleColumns(table);
         var dualColumns = ResolveDualColumns(table);
-        var hasLabelColumn = table.HeaderMap.TryGetValue("Label", out var labelIndex);
-        var hasIsDualColumn = table.HeaderMap.TryGetValue("IsDual", out var isDualIndex);
+        int? labelIndex = table.HeaderMap.TryGetValue("Label", out var labelIdx) ? labelIdx : null;
+        int? isDualIndex = table.HeaderMap.TryGetValue("IsDual", out var isDualIdx) ? isDualIdx : null;
 
-        var rows = new List<RowData>(table.Rows.Count);
+        var rowsByDuration = durationsSeconds.ToDictionary(
+            d => d,
+            _ => new Dictionary<LabelModeSelection, List<RowData>>
+            {
+                [LabelModeSelection.Single] = new List<RowData>(),
+                [LabelModeSelection.Dual] = new List<RowData>()
+            });
+
+        var skippedMissingColumns = new Dictionary<LabelModeSelection, int>
+        {
+            [LabelModeSelection.Single] = 0,
+            [LabelModeSelection.Dual] = 0
+        };
+
         foreach (var row in table.Rows)
         {
-            double totalCounts = ReadTotalCounts(table, row, totalCountsColumn);
-            var label = ResolveLabel(row, labelIndex, isDualIndex, hasLabelColumn, hasIsDualColumn, dualColumns);
-            if (label == SourceLabel.Single)
-            {
-                if (singleColumns is null)
-                {
-                    throw new InvalidOperationException("Single-source columns were not found in the evaluation CSV.");
-                }
+            int durationSeconds = durationColumn.HasValue
+                ? ParseDurationSeconds(SafeGet(row, durationColumn.Value), durationColumnName ?? "Duration_s")
+                : inferredDuration!.Value;
 
-                var truePos = ReadCoords(row, singleColumns.True);
-                var predPos = ReadCoords(row, singleColumns.Pred);
-                double errorCm = ComputeSingleErrorCm(truePos, predPos);
-                rows.Add(new RowData(totalCounts, errorCm, label));
+            if (!rowsByDuration.ContainsKey(durationSeconds))
+            {
+                continue;
             }
-            else
+
+            double totalCounts = ReadTotalCounts(table, row, totalCountsColumn);
+            var rowMode = selection == LabelModeSelection.Auto
+                ? ResolveRowMode(row, labelIndex, isDualIndex, dualColumns)
+                : selection;
+
+            if (rowMode == LabelModeSelection.Single)
             {
-                if (dualColumns is null)
+                if (selection == LabelModeSelection.Dual)
                 {
-                    throw new InvalidOperationException("Dual-source columns were not found in the evaluation CSV.");
+                    continue;
                 }
 
-                var truePair = ReadDualCoords(row, dualColumns.True);
-                var predPair = ReadDualCoords(row, dualColumns.Pred);
-                double errorCm = ComputeDualErrorCm(truePair, predPair);
-                rows.Add(new RowData(totalCounts, errorCm, label));
+                var sc = singleColumns;
+                if (sc is null)
+                {
+                    skippedMissingColumns[LabelModeSelection.Single]++;
+                    continue;
+                }
+
+                if (!TryReadCoords(row, sc.True, out var truePos)
+                    || !TryReadCoords(row, sc.Pred, out var predPos))
+                {
+                    skippedMissingColumns[LabelModeSelection.Single]++;
+                    continue;
+                }
+
+                double errorMeters = ComputeSingleErrorMeters(truePos, predPos);
+                rowsByDuration[durationSeconds][LabelModeSelection.Single]
+                    .Add(new RowData(totalCounts, errorMeters));
+            }
+
+
+            var thresholds = new Dictionary<string, TriggerPolicyThresholds>();
+        var thresholdsMetadata = new Dictionary<string, TriggerPolicyThresholdMetadata>();
+        var rowsUsed = new Dictionary<string, Dictionary<string, int>>();
+
+        foreach (var duration in durationsSeconds)
+        {
+            var durationKey = duration.ToString(CultureInfo.InvariantCulture);
+            var durationRows = rowsByDuration[duration];
+            var durationUsage = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["single"] = durationRows[LabelModeSelection.Single].Count,
+                ["dual"] = durationRows[LabelModeSelection.Dual].Count
+            };
+            rowsUsed[durationKey] = durationUsage;
+
+            ThresholdComputationResult? singleResult = selection == LabelModeSelection.Dual
+                ? null
+                : ComputeThreshold(durationRows[LabelModeSelection.Single], targetMedianMeters, binWidthCounts, minSamplesPerBin);
+            ThresholdComputationResult? dualResult = selection == LabelModeSelection.Single
+                ? null
+                : ComputeThreshold(durationRows[LabelModeSelection.Dual], targetMedianMeters, binWidthCounts, minSamplesPerBin);
+
+            thresholds[durationKey] = new TriggerPolicyThresholds
+            {
+                Nmin15cmSingle = singleResult?.Threshold,
+                Nmin15cmDual = dualResult?.Threshold
+            };
+
+            thresholdsMetadata[durationKey] = new TriggerPolicyThresholdMetadata
+            {
+                Single = singleResult is null ? null : BuildThresholdMetadata(singleResult),
+                Dual = dualResult is null ? null : BuildThresholdMetadata(dualResult)
+            };
+        }
+
+        var output = new TriggerPolicyOutput
+        {
+            SchemaVersion = SchemaVersion,
+            CreatedUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            GitCommit = ResolveGitCommit(),
+            Dataset = Path.GetFileName(evalCsvPath),
+            MetricDefinition = MetricDefinition,
+            Binning = new TriggerPolicyBinning
+            {
+                BinWidthCounts = binWidthCounts,
+                MinSamplesPerBin = minSamplesPerBin
+            },
+            Target = new TriggerPolicyTarget
+            {
+                TargetMedianErrorMeters = targetMedianMeters,
+                DurationsSeconds = durationsSeconds
+            },
+            Thresholds = thresholds,
+            ColumnMappingUsed = BuildColumnMapping(totalCountsColumn, durationColumnName, labelIndex, isDualIndex, singleColumns, dualColumns),
+            RowsTotal = table.Rows.Count,
+            RowsUsedPerDurationAndMode = rowsUsed,
+            RowsSkippedMissingColumns = new TriggerPolicySkippedRows
+            {
+                Single = skippedMissingColumns[LabelModeSelection.Single],
+                Dual = skippedMissingColumns[LabelModeSelection.Dual]
+            },
+            SelectionRule = MetricDefinition,
+            Notes = notes,
+            ThresholdsMetadata = thresholdsMetadata,
+            LabelMode = selection.ToString().ToLowerInvariant()
+        };
+
+        var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
+        Directory.CreateDirectory(Path.GetDirectoryName(outPath) ?? ".");
+        File.WriteAllText(outPath, json);
+
+        return output;
+    }
+
+    private static TriggerPolicyThresholdDetail BuildThresholdMetadata(ThresholdComputationResult result)
+    {
+        return new TriggerPolicyThresholdDetail
+        {
+            UnmetTarget = result.UnmetTarget,
+            TailMedianErrorMeters = result.TailMedianErrorMeters,
+            TailSamples = result.TailSamples,
+            MaxTotalCountsObserved = result.MaxTotalCountsObserved
+        };
+    }
+
+    private static TriggerPolicyColumnMapping BuildColumnMapping(
+        TotalCountsColumn totalCountsColumn,
+        string? durationColumnName,
+        int? labelIndex,
+        int? isDualIndex,
+        SingleCoordColumns? singleColumns,
+        DualCoordColumns? dualColumns)
+    {
+        return new TriggerPolicyColumnMapping
+        {
+            TotalCountsColumn = totalCountsColumn.TotalCountsIndex.HasValue ? totalCountsColumn.TotalCountsName : null,
+            ChannelColumns = totalCountsColumn.ChannelNames,
+            DurationColumn = durationColumnName,
+            LabelColumn = labelIndex.HasValue ? "Label" : null,
+            IsDualColumn = isDualIndex.HasValue ? "IsDual" : null,
+            SingleTrueColumns = singleColumns?.True.Names,
+            SinglePredColumns = singleColumns?.Pred.Names,
+            DualTrue1Columns = dualColumns?.True.First.Names,
+            DualTrue2Columns = dualColumns?.True.Second.Names,
+            DualPred1Columns = dualColumns?.Pred.First.Names,
+            DualPred2Columns = dualColumns?.Pred.Second.Names
+        };
+    }
+
+    private static ThresholdComputationResult ComputeThreshold(List<RowData> rows, double targetMedianMeters, int binWidthCounts, int minSamplesPerBin)
+    {
+        if (rows.Count == 0)
+        {
+            return new ThresholdComputationResult(null, true, null, 0, 0);
+        }
+
+        double minCounts = rows.Min(r => r.TotalCounts);
+        double maxCounts = rows.Max(r => r.TotalCounts);
+        int minBin = (int)Math.Floor(minCounts / binWidthCounts);
+        int maxBin = (int)Math.Floor(maxCounts / binWidthCounts);
+
+        int? selectedThreshold = null;
+        double? selectedMedian = null;
+        int selectedSamples = 0;
+
+        for (int bin = minBin; bin <= maxBin; bin++)
+        {
+            int threshold = bin * binWidthCounts;
+            var tailRows = rows.Where(r => r.TotalCounts >= threshold).ToList();
+            if (tailRows.Count < minSamplesPerBin)
+            {
+                continue;
+            }
+
+            double median = Median(tailRows.Select(r => r.ErrorMeters).ToList());
+            if (median <= targetMedianMeters)
+            {
+                selectedThreshold = threshold;
+                selectedMedian = median;
+                selectedSamples = tailRows.Count;
+                break;
             }
         }
 
-        var singleRows = rows.Where(r => r.Label == SourceLabel.Single).ToList();
-        var dualRows = rows.Where(r => r.Label == SourceLabel.Dual).ToList();
+        if (!selectedThreshold.HasValue)
+        {
+            int thresholdAtMax = (int)Math.Round(maxCounts, MidpointRounding.AwayFromZero);
+            double medianAtMax = Median(rows.Where(r => r.TotalCounts >= thresholdAtMax).Select(r => r.ErrorMeters).ToList());
+            return new ThresholdComputationResult(thresholdAtMax, true, medianAtMax, rows.Count, maxCounts);
+        }
 
-        var singleResult = ComputeThreshold(singleRows, errorTargetCm, bins, minSamplesPerBin, "Single");
-        var dualResult = ComputeThreshold(dualRows, errorTargetCm, bins, minSamplesPerBin, "Dual");
-
-        var output = new TriggerThresholdOutput(
-            singleResult.Threshold,
-            dualResult.Threshold,
-            errorTargetCm,
-            bins,
-            minSamplesPerBin,
-            Path.GetFileName(evalCsvPath),
-            DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
-            NotesText,
-            singleResult.FailureToMeetTarget,
-            singleResult.BestMedianErrorAtMaxCounts,
-            dualResult.FailureToMeetTarget,
-            dualResult.BestMedianErrorAtMaxCounts,
-            ConfuseDebounceWindows: 2,
-            RecoverDebounceWindows: 2,
-            QualityMin: 3.0,
-            CheckEveryCounts: 2000,
-            MinPublishDurationSeconds: 30.0,
-            MaxPublishDurationSeconds: 60.0,
-            ThrashWindowCount: 6,
-            ThrashChangeThreshold: 3,
-            StabilityToleranceCm: 5.0,
-            StabilityK: 3,
-            EarlyStopProbability: 0.98,
-            EarlyStopK: 2,
-            PublishProbabilityMin: 0.80);
-
-        var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(triggerJsonOutPath, json);
-
-        Console.WriteLine($"Single: rows={singleRows.Count}, minCounts={singleResult.MinCounts:F0}, maxCounts={singleResult.MaxCounts:F0}, threshold={singleResult.Threshold}, medianAtThreshold={singleResult.MedianAtThreshold:F2} cm");
-        Console.WriteLine($"Dual: rows={dualRows.Count}, minCounts={dualResult.MinCounts:F0}, maxCounts={dualResult.MaxCounts:F0}, threshold={dualResult.Threshold}, medianAtThreshold={dualResult.MedianAtThreshold:F2} cm");
-
-        return new TriggerThresholdResult(output, singleResult, dualResult);
+        return new ThresholdComputationResult(selectedThreshold.Value, false, selectedMedian, selectedSamples, maxCounts);
     }
 
     private static CsvTable LoadCsvTable(string path)
@@ -131,21 +312,76 @@ internal static class TriggerThresholdHelper
         return new CsvTable(headers, rows);
     }
 
+    private static int ParseDurationSeconds(string value, string columnName)
+    {
+        double parsed = ParseDouble(value, columnName);
+        return (int)Math.Round(parsed, MidpointRounding.AwayFromZero);
+    }
+
+    private static int InferDurationFromFilename(string path, int[] durationsSeconds)
+    {
+        string name = Path.GetFileNameWithoutExtension(path);
+        var matches = new List<int>();
+        foreach (var duration in durationsSeconds)
+        {
+            string pattern = $@"(?<!\d){duration}(?!\d)";
+            if (System.Text.RegularExpressions.Regex.IsMatch(name, pattern))
+            {
+                matches.Add(duration);
+            }
+        }
+
+        if (matches.Count == 1)
+        {
+            return matches[0];
+        }
+
+        if (matches.Count == 0)
+        {
+            throw new InvalidOperationException("Duration_s column not found and duration could not be inferred from the filename.");
+        }
+
+        throw new InvalidOperationException("Duration_s column not found and multiple duration tokens were found in the filename.");
+    }
+
+    private static int? ResolveDurationColumn(CsvTable table, out string? columnName)
+    {
+        string[] candidates = { "Duration_s", "duration_s", "DurationSeconds", "Duration" };
+        foreach (var candidate in candidates)
+        {
+            if (table.HeaderMap.TryGetValue(candidate, out var idx))
+            {
+                columnName = candidate;
+                return idx;
+            }
+        }
+
+        columnName = null;
+        return null;
+    }
+
     private static TotalCountsColumn ResolveTotalCountsColumn(CsvTable table)
     {
         if (table.HeaderMap.TryGetValue("TotalCounts", out var totalIndex))
         {
-            return new TotalCountsColumn(totalIndex, Array.Empty<int>());
+            return new TotalCountsColumn(totalIndex, "TotalCounts", Array.Empty<int>(), Array.Empty<string>());
         }
 
         var channelIndices = new List<int>();
+        var channelNames = new List<string>();
         for (int i = 1; i <= 15; i++)
         {
             string preferred = $"Channel{i}";
             string fallback = $"c{i}";
-            if (table.HeaderMap.TryGetValue(preferred, out var idx) || table.HeaderMap.TryGetValue(fallback, out idx))
+            if (table.HeaderMap.TryGetValue(preferred, out var idx))
             {
                 channelIndices.Add(idx);
+                channelNames.Add(preferred);
+            }
+            else if (table.HeaderMap.TryGetValue(fallback, out idx))
+            {
+                channelIndices.Add(idx);
+                channelNames.Add(fallback);
             }
         }
 
@@ -154,7 +390,7 @@ internal static class TriggerThresholdHelper
             throw new InvalidOperationException("Evaluation CSV must contain TotalCounts or a full set of Channel1..Channel15 (or c1..c15) columns.");
         }
 
-        return new TotalCountsColumn(null, channelIndices.ToArray());
+        return new TotalCountsColumn(null, null, channelIndices.ToArray(), channelNames.ToArray());
     }
 
     private static SingleCoordColumns? ResolveSingleColumns(CsvTable table)
@@ -216,50 +452,81 @@ internal static class TriggerThresholdHelper
         return null;
     }
 
-    private static SourceLabel ResolveLabel(string[] row, int labelIndex, int isDualIndex, bool hasLabelColumn, bool hasIsDualColumn, DualCoordColumns? dualColumns)
+    private static bool TryResolveCoords(Dictionary<string, int> headerMap, string[] names, out CoordColumns coords)
     {
-        if (hasLabelColumn)
-        {
-            string value = SafeGet(row, labelIndex).Trim();
-            if (value.Length == 0)
-            {
-                throw new InvalidOperationException("Label column exists but contains an empty value.");
-            }
+        // Must assign a non-null value because nullable warnings are treated as errors.
+        // This value is only used to satisfy definite assignment when we return false.
+        coords = new CoordColumns(-1, -1, -1, names);
 
+        if (!headerMap.TryGetValue(names[0], out var x)
+            || !headerMap.TryGetValue(names[1], out var y)
+            || !headerMap.TryGetValue(names[2], out var z))
+        {
+            return false;
+        }
+
+        coords = new CoordColumns(x, y, z, names);
+        return true;
+    }
+
+
+    private static LabelModeSelection ResolveRowMode(string[] row, int? labelIndex, int? isDualIndex, DualCoordColumns? dualColumns)
+    {
+        if (labelIndex.HasValue)
+        {
+            string value = SafeGet(row, labelIndex.Value).Trim();
             if (value.Contains("dual", StringComparison.OrdinalIgnoreCase))
             {
-                return SourceLabel.Dual;
+                return LabelModeSelection.Dual;
             }
 
             if (value.Contains("single", StringComparison.OrdinalIgnoreCase))
             {
-                return SourceLabel.Single;
+                return LabelModeSelection.Single;
             }
 
             throw new InvalidOperationException($"Unrecognized Label value '{value}'.");
         }
 
-        if (hasIsDualColumn)
+        if (isDualIndex.HasValue)
         {
-            string value = SafeGet(row, isDualIndex).Trim();
+            string value = SafeGet(row, isDualIndex.Value).Trim();
             if (!bool.TryParse(value, out var isDual))
             {
                 throw new InvalidOperationException($"IsDual value '{value}' was not recognized as a boolean.");
             }
 
-            return isDual ? SourceLabel.Dual : SourceLabel.Single;
+            return isDual ? LabelModeSelection.Dual : LabelModeSelection.Single;
         }
 
-        if (dualColumns is not null)
+        if (dualColumns is not null
+            && TryReadDualCoords(row, dualColumns.True, out _)
+            && TryReadDualCoords(row, dualColumns.Pred, out _))
         {
-            var truePair = TryReadDualCoords(row, dualColumns.True);
-            if (truePair is not null)
-            {
-                return SourceLabel.Dual;
-            }
+            return LabelModeSelection.Dual;
         }
 
-        return SourceLabel.Single;
+        return LabelModeSelection.Single;
+    }
+
+    private static LabelModeSelection ParseLabelMode(string labelMode)
+    {
+        if (string.Equals(labelMode, "single", StringComparison.OrdinalIgnoreCase))
+        {
+            return LabelModeSelection.Single;
+        }
+
+        if (string.Equals(labelMode, "dual", StringComparison.OrdinalIgnoreCase))
+        {
+            return LabelModeSelection.Dual;
+        }
+
+        if (string.Equals(labelMode, "auto", StringComparison.OrdinalIgnoreCase))
+        {
+            return LabelModeSelection.Auto;
+        }
+
+        throw new ArgumentException("--trigger-policy-label-mode must be one of 'single', 'dual', or 'auto'.");
     }
 
     private static double ReadTotalCounts(CsvTable table, string[] row, TotalCountsColumn totalCountsColumn)
@@ -267,7 +534,7 @@ internal static class TriggerThresholdHelper
         if (totalCountsColumn.TotalCountsIndex.HasValue)
         {
             string value = SafeGet(row, totalCountsColumn.TotalCountsIndex.Value).Trim();
-            return ParseDouble(value, "TotalCounts");
+            return ParseDouble(value, totalCountsColumn.TotalCountsName ?? "TotalCounts");
         }
 
         double sum = 0;
@@ -280,46 +547,7 @@ internal static class TriggerThresholdHelper
         return sum;
     }
 
-    private static bool TryResolveCoords(Dictionary<string, int> headerMap, string[] names, out CoordColumns coords)
-    {
-        coords = null!;
-        if (!headerMap.TryGetValue(names[0], out var x)
-            || !headerMap.TryGetValue(names[1], out var y)
-            || !headerMap.TryGetValue(names[2], out var z))
-        {
-            return false;
-        }
-
-        coords = new CoordColumns(x, y, z);
-        return true;
-    }
-
-    private static (double X, double Y, double Z) ReadCoords(string[] row, CoordColumns coords)
-    {
-        double x = ParseDouble(SafeGet(row, coords.X).Trim(), "x");
-        double y = ParseDouble(SafeGet(row, coords.Y).Trim(), "y");
-        double z = ParseDouble(SafeGet(row, coords.Z).Trim(), "z");
-        return (x, y, z);
-    }
-
-    private static DualCoords ReadDualCoords(string[] row, DualCoordSet coords)
-    {
-        var first = ReadCoords(row, coords.First);
-        var second = ReadCoords(row, coords.Second);
-        return new DualCoords(first, second);
-    }
-
-    private static DualCoords? TryReadDualCoords(string[] row, DualCoordSet coords)
-    {
-        if (!TryReadCoord(row, coords.First, out var first) || !TryReadCoord(row, coords.Second, out var second))
-        {
-            return null;
-        }
-
-        return new DualCoords(first, second);
-    }
-
-    private static bool TryReadCoord(string[] row, CoordColumns coords, out (double X, double Y, double Z) value)
+    private static bool TryReadCoords(string[] row, CoordColumns coords, out (double X, double Y, double Z) value)
     {
         value = default;
         if (!double.TryParse(SafeGet(row, coords.X).Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var x)
@@ -338,146 +566,40 @@ internal static class TriggerThresholdHelper
         return true;
     }
 
-    private static double ComputeSingleErrorCm((double X, double Y, double Z) truePos, (double X, double Y, double Z) predPos)
+    private static bool TryReadDualCoords(string[] row, DualCoordSet coords, out DualCoords? value)
+    {
+        value = null;
+        if (!TryReadCoords(row, coords.First, out var first) || !TryReadCoords(row, coords.Second, out var second))
+        {
+            return false;
+
+        }
+
+        value = new DualCoords(first, second);
+        return true;
+    }
+
+
+    private static double ComputeSingleErrorMeters((double X, double Y, double Z) truePos, (double X, double Y, double Z) predPos)
     {
         double dx = predPos.X - truePos.X;
         double dy = predPos.Y - truePos.Y;
         double dz = predPos.Z - truePos.Z;
-        double distanceMeters = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-        return distanceMeters * 100.0;
+        return Math.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    private static double ComputeDualErrorCm(DualCoords trueCoords, DualCoords predCoords)
+    private static double ComputeDualErrorMeters(DualCoords trueCoords, DualCoords predCoords)
     {
-        double option1 = MaxDistanceCm(trueCoords.First, predCoords.First, trueCoords.Second, predCoords.Second);
-        double option2 = MaxDistanceCm(trueCoords.First, predCoords.Second, trueCoords.Second, predCoords.First);
+        double option1 = MaxDistanceMeters(trueCoords.First, predCoords.First, trueCoords.Second, predCoords.Second);
+        double option2 = MaxDistanceMeters(trueCoords.First, predCoords.Second, trueCoords.Second, predCoords.First);
         return Math.Min(option1, option2);
     }
 
-    private static double MaxDistanceCm((double X, double Y, double Z) true1, (double X, double Y, double Z) pred1, (double X, double Y, double Z) true2, (double X, double Y, double Z) pred2)
+    private static double MaxDistanceMeters((double X, double Y, double Z) true1, (double X, double Y, double Z) pred1, (double X, double Y, double Z) true2, (double X, double Y, double Z) pred2)
     {
-        double d1 = ComputeSingleErrorCm(true1, pred1);
-        double d2 = ComputeSingleErrorCm(true2, pred2);
+        double d1 = ComputeSingleErrorMeters(true1, pred1);
+        double d2 = ComputeSingleErrorMeters(true2, pred2);
         return Math.Max(d1, d2);
-    }
-
-    private static ThresholdGroupResult ComputeThreshold(List<RowData> rows, double errorTargetCm, int bins, int minSamplesPerBin, string label)
-    {
-        if (rows.Count == 0)
-        {
-            throw new InvalidOperationException($"No {label} rows were found for threshold computation.");
-        }
-
-        var minCounts = rows.Min(r => r.TotalCounts);
-        var maxCounts = rows.Max(r => r.TotalCounts);
-        var binSummaries = BuildBins(rows, bins, minSamplesPerBin);
-        var validBins = binSummaries.Where(b => b.SampleCount >= minSamplesPerBin).OrderBy(b => b.LowerEdge).ToList();
-
-        double threshold = maxCounts;
-        double medianAtThreshold = validBins.Count > 0 ? validBins[^1].MedianErrorCm : double.NaN;
-        bool failure = true;
-        double bestMedianAtMaxCounts = validBins.Count > 0 ? validBins[^1].MedianErrorCm : double.NaN;
-
-        foreach (var bin in validBins)
-        {
-            bool tailOk = true;
-            foreach (var tail in validBins.Where(b => b.LowerEdge >= bin.LowerEdge))
-            {
-                if (tail.MedianErrorCm > errorTargetCm)
-                {
-                    tailOk = false;
-                    break;
-                }
-            }
-
-            if (tailOk)
-            {
-                threshold = bin.LowerEdge;
-                medianAtThreshold = bin.MedianErrorCm;
-                failure = false;
-                break;
-            }
-        }
-
-        int thresholdRounded = (int)Math.Round(threshold, MidpointRounding.AwayFromZero);
-        return new ThresholdGroupResult(thresholdRounded, minCounts, maxCounts, medianAtThreshold, failure, bestMedianAtMaxCounts);
-    }
-
-    private static List<BinSummary> BuildBins(List<RowData> rows, int bins, int minSamplesPerBin)
-    {
-        if (bins <= 0)
-        {
-            throw new ArgumentException("--bins must be positive.");
-        }
-
-        var sortedCounts = rows.Select(r => r.TotalCounts).OrderBy(v => v).ToArray();
-        var edges = new double[Math.Max(0, bins - 1)];
-        for (int i = 1; i < bins; i++)
-        {
-            edges[i - 1] = Quantile(sortedCounts, (double)i / bins);
-        }
-
-        var binRows = new List<RowData>[bins];
-        for (int i = 0; i < bins; i++)
-        {
-            binRows[i] = new List<RowData>();
-        }
-
-        foreach (var row in rows)
-        {
-            int binIndex = FindBinIndex(row.TotalCounts, edges);
-            binRows[binIndex].Add(row);
-        }
-
-        var summaries = new List<BinSummary>();
-        double lowerEdge = sortedCounts.Length > 0 ? sortedCounts[0] : 0;
-        for (int i = 0; i < bins; i++)
-        {
-            double upperEdge = i < edges.Length ? edges[i] : double.PositiveInfinity;
-            var errors = binRows[i].Select(r => r.ErrorCm).ToList();
-            double median = errors.Count > 0 ? Median(errors) : double.NaN;
-            summaries.Add(new BinSummary(lowerEdge, upperEdge, errors.Count, median));
-            lowerEdge = upperEdge;
-        }
-
-        return summaries;
-    }
-
-    private static int FindBinIndex(double value, double[] edges)
-    {
-        for (int i = 0; i < edges.Length; i++)
-        {
-            if (value <= edges[i])
-            {
-                return i;
-            }
-        }
-
-        return edges.Length;
-    }
-
-    private static double Quantile(double[] sorted, double q)
-    {
-        if (sorted.Length == 0)
-        {
-            return double.NaN;
-        }
-
-        if (sorted.Length == 1)
-        {
-            return sorted[0];
-        }
-
-        double position = q * (sorted.Length - 1);
-        int lower = (int)Math.Floor(position);
-        int upper = (int)Math.Ceiling(position);
-        if (lower == upper)
-        {
-            return sorted[lower];
-        }
-
-        double weight = position - lower;
-        return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
     }
 
     private static double Median(List<double> values)
@@ -518,6 +640,45 @@ internal static class TriggerThresholdHelper
         return index >= 0 && index < row.Length ? row[index] : string.Empty;
     }
 
+    private static string? ResolveGitCommit()
+    {
+        string? envCommit = Environment.GetEnvironmentVariable("GIT_COMMIT");
+        if (!string.IsNullOrWhiteSpace(envCommit))
+        {
+            return envCommit;
+        }
+
+        try
+        {
+            var startInfo = new ProcessStartInfo("git", "rev-parse HEAD")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return null;
+            }
+
+            string output = process.StandardOutput.ReadToEnd().Trim();
+            process.WaitForExit(2000);
+            if (process.ExitCode == 0 && output.Length > 0)
+            {
+                return output;
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+
+        return null;
+    }
+
     private sealed record CsvTable(string[] Headers, List<string[]> Rows)
     {
         public Dictionary<string, int> HeaderMap { get; } = Headers
@@ -525,9 +686,9 @@ internal static class TriggerThresholdHelper
             .ToDictionary(h => h.Header, h => h.Index, StringComparer.OrdinalIgnoreCase);
     }
 
-    private sealed record TotalCountsColumn(int? TotalCountsIndex, int[] ChannelIndices);
+    private sealed record TotalCountsColumn(int? TotalCountsIndex, string? TotalCountsName, int[] ChannelIndices, string[] ChannelNames);
 
-    private sealed record CoordColumns(int X, int Y, int Z);
+    private sealed record CoordColumns(int X, int Y, int Z, string[] Names);
 
     private sealed record SingleCoordColumns(CoordColumns True, CoordColumns Pred);
 
@@ -537,44 +698,161 @@ internal static class TriggerThresholdHelper
 
     private sealed record DualCoords((double X, double Y, double Z) First, (double X, double Y, double Z) Second);
 
-    private sealed record RowData(double TotalCounts, double ErrorCm, SourceLabel Label);
+    private sealed record RowData(double TotalCounts, double ErrorMeters);
 
-    private sealed record BinSummary(double LowerEdge, double UpperEdge, int SampleCount, double MedianErrorCm);
+    private sealed record ThresholdComputationResult(int? Threshold, bool UnmetTarget, double? TailMedianErrorMeters, int TailSamples, double MaxTotalCountsObserved);
 
-    private enum SourceLabel
+    private enum LabelModeSelection
     {
         Single,
-        Dual
+        Dual,
+        Auto
     }
 }
 
-internal sealed record TriggerThresholdOutput(
-    int Nmin_15cm_30s,
-    int Nmin_15cm_60s,
-    double error_target_cm,
-    int bins,
-    int min_samples_per_bin,
-    string generated_from,
-    string generated_at_utc,
-    string notes,
-    bool single_failure_to_meet_target,
-    double single_best_median_error_cm,
-    bool dual_failure_to_meet_target,
-    double dual_best_median_error_cm,
-    int ConfuseDebounceWindows,
-    int RecoverDebounceWindows,
-    double QualityMin,
-    int CheckEveryCounts,
-    double MinPublishDurationSeconds,
-    double MaxPublishDurationSeconds,
-    int ThrashWindowCount,
-    int ThrashChangeThreshold,
-    double StabilityToleranceCm,
-    int StabilityK,
-    double EarlyStopProbability,
-    int EarlyStopK,
-    double PublishProbabilityMin);
+internal sealed record TriggerPolicyOutput
+{
+    [JsonPropertyName("schema_version")]
+    public int SchemaVersion { get; init; }
 
-internal sealed record ThresholdGroupResult(int Threshold, double MinCounts, double MaxCounts, double MedianAtThreshold, bool FailureToMeetTarget, double BestMedianErrorAtMaxCounts);
+    [JsonPropertyName("created_utc")]
+    public string CreatedUtc { get; init; } = string.Empty;
 
-internal sealed record TriggerThresholdResult(TriggerThresholdOutput Output, ThresholdGroupResult Single, ThresholdGroupResult Dual);
+    [JsonPropertyName("git_commit")]
+    public string? GitCommit { get; init; }
+
+    [JsonPropertyName("dataset")]
+    public string Dataset { get; init; } = string.Empty;
+
+    [JsonPropertyName("metric_definition")]
+    public string MetricDefinition { get; init; } = string.Empty;
+
+    [JsonPropertyName("binning")]
+    public TriggerPolicyBinning Binning { get; init; } = new();
+
+    [JsonPropertyName("target")]
+    public TriggerPolicyTarget Target { get; init; } = new();
+
+    [JsonPropertyName("thresholds")]
+    public Dictionary<string, TriggerPolicyThresholds> Thresholds { get; init; } = new();
+
+    [JsonPropertyName("column_mapping_used")]
+    public TriggerPolicyColumnMapping ColumnMappingUsed { get; init; } = new();
+
+    [JsonPropertyName("rows_total")]
+    public int RowsTotal { get; init; }
+
+    [JsonPropertyName("rows_used_per_duration_and_mode")]
+    public Dictionary<string, Dictionary<string, int>> RowsUsedPerDurationAndMode { get; init; } = new();
+
+    [JsonPropertyName("rows_skipped_missing_columns")]
+    public TriggerPolicySkippedRows RowsSkippedMissingColumns { get; init; } = new();
+
+    [JsonPropertyName("selection_rule")]
+    public string SelectionRule { get; init; } = string.Empty;
+
+    [JsonPropertyName("notes")]
+    public string? Notes { get; init; }
+
+    [JsonPropertyName("thresholds_metadata")]
+    public Dictionary<string, TriggerPolicyThresholdMetadata> ThresholdsMetadata { get; init; } = new();
+
+    [JsonPropertyName("label_mode")]
+    public string LabelMode { get; init; } = "auto";
+}
+
+internal sealed record TriggerPolicyBinning
+{
+    [JsonPropertyName("bin_width_counts")]
+    public int BinWidthCounts { get; init; }
+
+    [JsonPropertyName("min_samples_per_bin")]
+    public int MinSamplesPerBin { get; init; }
+}
+
+internal sealed record TriggerPolicyTarget
+{
+    [JsonPropertyName("target_median_error_m")]
+    public double TargetMedianErrorMeters { get; init; }
+
+    [JsonPropertyName("durations_s")]
+    public int[] DurationsSeconds { get; init; } = Array.Empty<int>();
+}
+
+internal sealed record TriggerPolicyThresholds
+{
+    [JsonPropertyName("nmin_15cm_single")]
+    public int? Nmin15cmSingle { get; init; }
+
+    [JsonPropertyName("nmin_15cm_dual")]
+    public int? Nmin15cmDual { get; init; }
+}
+
+internal sealed record TriggerPolicyThresholdMetadata
+{
+    [JsonPropertyName("single")]
+    public TriggerPolicyThresholdDetail? Single { get; init; }
+
+    [JsonPropertyName("dual")]
+    public TriggerPolicyThresholdDetail? Dual { get; init; }
+}
+
+internal sealed record TriggerPolicyThresholdDetail
+{
+    [JsonPropertyName("unmet_target")]
+    public bool UnmetTarget { get; init; }
+
+    [JsonPropertyName("tail_median_error_m")]
+    public double? TailMedianErrorMeters { get; init; }
+
+    [JsonPropertyName("tail_samples")]
+    public int TailSamples { get; init; }
+
+    [JsonPropertyName("max_total_counts_observed")]
+    public double MaxTotalCountsObserved { get; init; }
+}
+
+internal sealed record TriggerPolicyColumnMapping
+{
+    [JsonPropertyName("total_counts_column")]
+    public string? TotalCountsColumn { get; init; }
+
+    [JsonPropertyName("channel_columns")]
+    public string[]? ChannelColumns { get; init; }
+
+    [JsonPropertyName("duration_column")]
+    public string? DurationColumn { get; init; }
+
+    [JsonPropertyName("label_column")]
+    public string? LabelColumn { get; init; }
+
+    [JsonPropertyName("is_dual_column")]
+    public string? IsDualColumn { get; init; }
+
+    [JsonPropertyName("single_true_columns")]
+    public string[]? SingleTrueColumns { get; init; }
+
+    [JsonPropertyName("single_pred_columns")]
+    public string[]? SinglePredColumns { get; init; }
+
+    [JsonPropertyName("dual_true_1_columns")]
+    public string[]? DualTrue1Columns { get; init; }
+
+    [JsonPropertyName("dual_true_2_columns")]
+    public string[]? DualTrue2Columns { get; init; }
+
+    [JsonPropertyName("dual_pred_1_columns")]
+    public string[]? DualPred1Columns { get; init; }
+
+    [JsonPropertyName("dual_pred_2_columns")]
+    public string[]? DualPred2Columns { get; init; }
+}
+
+internal sealed record TriggerPolicySkippedRows
+{
+    [JsonPropertyName("single")]
+    public int Single { get; init; }
+
+    [JsonPropertyName("dual")]
+    public int Dual { get; init; }
+}
