@@ -114,14 +114,15 @@ internal static class TriggerPolicyWriter
                     continue;
                 }
 
-                if (singleColumns is null)
+                var sc = singleColumns;
+                if (sc is null)
                 {
                     skippedMissingColumns[LabelModeSelection.Single]++;
                     continue;
                 }
 
-                if (!TryReadCoords(row, singleColumns.True, out var truePos)
-                    || !TryReadCoords(row, singleColumns.Pred, out var predPos))
+                if (!TryReadCoords(row, sc.True, out var truePos)
+                    || !TryReadCoords(row, sc.Pred, out var predPos))
                 {
                     skippedMissingColumns[LabelModeSelection.Single]++;
                     continue;
@@ -137,14 +138,17 @@ internal static class TriggerPolicyWriter
                     continue;
                 }
 
-                if (dualColumns is null)
+                var dc = dualColumns;
+                if (dc is null)
                 {
                     skippedMissingColumns[LabelModeSelection.Dual]++;
                     continue;
                 }
 
-                if (!TryReadDualCoords(row, dualColumns.True, out var truePair)
-                    || !TryReadDualCoords(row, dualColumns.Pred, out var predPair))
+                if (!TryReadDualCoords(row, dc.True, out var truePair)
+                    || !TryReadDualCoords(row, dc.Pred, out var predPair)
+                    || truePair is null
+                    || predPair is null)
                 {
                     skippedMissingColumns[LabelModeSelection.Dual]++;
                     continue;
