@@ -46,7 +46,7 @@ namespace Listen_N.Tests
             var orchestrator = new LocalizationOrchestratorService(
                 bridge.Snapshots.Reader,
                 bridge.Requests,
-                new DefaultLocalizationTriggerPolicy(),
+                new NeverTriggerPolicy(),
                 pipeline);
 
             using var cts = new CancellationTokenSource();
@@ -74,7 +74,7 @@ namespace Listen_N.Tests
             var orchestrator = new LocalizationOrchestratorService(
                 bridge.Snapshots.Reader,
                 bridge.Requests,
-                new DefaultLocalizationTriggerPolicy(),
+                new NeverTriggerPolicy(),
                 pipeline);
 
             using var cts = new CancellationTokenSource();
@@ -158,6 +158,11 @@ namespace Listen_N.Tests
                 SchemaVersion: 1,
                 SchemaHash: "v1",
                 Diagnostics: null);
+        }
+
+        private sealed class NeverTriggerPolicy : ILocalizationTriggerPolicy
+        {
+            public bool ShouldTrigger(AnalysisSnapshot snapshot) => false;
         }
 
         private sealed class FakePipeline : ILocalizationPipeline
