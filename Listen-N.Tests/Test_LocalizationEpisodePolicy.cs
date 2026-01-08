@@ -6,6 +6,8 @@ using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
 using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
 using Xunit;
+using RtWindowSummary = Integrated.Contracts.RtWindowSummary;
+
 
 namespace Listen_N.Tests
 {
