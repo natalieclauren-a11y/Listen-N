@@ -25,7 +25,7 @@ namespace Listen_N.Tests
                 CheckEveryCounts = 5000,
                 StabilityK = 2,
                 EarlyStopK = 2
-            });
+            }, TriggerPolicyThresholds.Defaults);
 
             var worker = new LocalizationWorker(new StableLocalizer(), capacity: 2);
             policy.OnRequestMl += worker.Enqueue;

@@ -30,6 +30,11 @@ namespace Integrated.Runtime
         {
         }
 
+        public LocalizationWorker(LocalizationPipeline pipeline, int capacity = 4)
+            : this(new PipelineLocalizer(pipeline), capacity)
+        {
+        }
+
         public LocalizationWorker(ILocalizer localizer, int capacity = 4)
         {
             if (capacity <= 0)
@@ -198,6 +203,11 @@ namespace Integrated.Runtime
                 }
 
                 _pipeline = LocalizationPipeline.Load(artifactsDirectory);
+            }
+
+            public PipelineLocalizer(LocalizationPipeline pipeline)
+            {
+                _pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
             }
 
             public RtLocalizationPrediction Predict(RtLocalizationRequest request)

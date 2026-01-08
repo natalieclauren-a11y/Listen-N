@@ -1,8 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Text.Json;
-using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using Integrated.Contracts;
 using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
 using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
@@ -81,7 +78,6 @@ namespace Integrated.Runtime
         public const string ProbeRequested = "ProbeRequested";
         public const string FinalRequestScheduled = "FinalRequestScheduled";
         public const string EpisodeCompleted = "EpisodeCompleted";
-        public const string TriggerPolicyThresholdsDefaulted = "TriggerPolicyThresholdsDefaulted";
     }
 
     public sealed record LocalizationEpisodePolicyConfig
@@ -103,55 +99,35 @@ namespace Integrated.Runtime
 
     public sealed record TriggerPolicyThresholds
     {
-        public int N_min_15cm_single { get; init; } = 20000;
-        public int N_min_15cm_dual { get; init; } = 40000;
+        public int Nmin_15cm_30s { get; init; }
+        public int Nmin_15cm_60s { get; init; }
 
-        public static TriggerPolicyThresholds Defaults => new();
-
-        public static (TriggerPolicyThresholds Thresholds, bool UsedDefaults) Load(string? artifactsDirectory)
+        public static TriggerPolicyThresholds Defaults => new()
         {
-            if (string.IsNullOrWhiteSpace(artifactsDirectory))
+            Nmin_15cm_30s = 20000,
+            Nmin_15cm_60s = 40000
+        };
+
+        public int GetThreshold(double durationSeconds, double minDurationSeconds, double maxDurationSeconds)
+        {
+            if (maxDurationSeconds <= minDurationSeconds)
             {
-                return (Defaults, true);
+                return Nmin_15cm_60s;
             }
 
-            var path = Path.Combine(artifactsDirectory, "trigger_policy.json");
-            if (!File.Exists(path))
+            if (durationSeconds <= minDurationSeconds)
             {
-                return (Defaults, true);
+                return Nmin_15cm_30s;
             }
 
-            try
+            if (durationSeconds >= maxDurationSeconds)
             {
-                var json = File.ReadAllText(path);
-                var parsed = JsonSerializer.Deserialize<TriggerPolicyThresholds>(json, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
-
-                if (parsed is null)
-                {
-                    return (Defaults, true);
-                }
-
-                bool usedDefaults = false;
-                int single = parsed.N_min_15cm_single > 0 ? parsed.N_min_15cm_single : Defaults.N_min_15cm_single;
-                int dual = parsed.N_min_15cm_dual > 0 ? parsed.N_min_15cm_dual : Defaults.N_min_15cm_dual;
-                if (single == Defaults.N_min_15cm_single || dual == Defaults.N_min_15cm_dual)
-                {
-                    usedDefaults = true;
-                }
-
-                return (new TriggerPolicyThresholds
-                {
-                    N_min_15cm_single = single,
-                    N_min_15cm_dual = dual
-                }, usedDefaults);
+                return Nmin_15cm_60s;
             }
-            catch (Exception)
-            {
-                return (Defaults, true);
-            }
+
+            double ratio = (durationSeconds - minDurationSeconds) / (maxDurationSeconds - minDurationSeconds);
+            double threshold = Nmin_15cm_30s + (Nmin_15cm_60s - Nmin_15cm_30s) * ratio;
+            return (int)Math.Round(threshold);
         }
     }
 
@@ -187,7 +163,6 @@ namespace Integrated.Runtime
         private double _pendingDuration;
         private double _pendingTotalCounts;
         private DateTimeOffset _pendingStartUtc;
-        private bool _thresholdWarningPending;
         private int _stableCount;
         private double[]? _lastPrediction;
         private bool? _lastPredictionIsDual;
@@ -195,12 +170,10 @@ namespace Integrated.Runtime
         private bool _lastIsConfused;
         private double _lastDelta = double.NaN;
 
-        public LocalizationEpisodePolicy(LocalizationEpisodePolicyConfig? config = null, string? artifactsDirectory = null)
+        public LocalizationEpisodePolicy(LocalizationEpisodePolicyConfig config, TriggerPolicyThresholds thresholds)
         {
-            _config = config ?? new LocalizationEpisodePolicyConfig();
-            var (thresholds, usedDefaults) = TriggerPolicyThresholds.Load(artifactsDirectory);
+            _config = config ?? throw new ArgumentNullException(nameof(config));
             _thresholds = thresholds;
-            _thresholdWarningPending = usedDefaults;
             _stateHistory = new List<string>(_config.ThrashWindowCount);
         }
 
@@ -222,7 +195,6 @@ namespace Integrated.Runtime
         public void AddWindow(RtWindowSummary w)
         {
             _lastWindowSummary = w;
-            EmitThresholdWarningIfNeeded();
             UpdateStateHistory(w.RtState);
 
             bool isConfused = IsConfused(w);
@@ -312,7 +284,7 @@ namespace Integrated.Runtime
 
             var duration = req.Row.DurationSeconds;
             var totalCounts = GetTotalCounts(req.Row.Channels);
-            var threshold = GetCountThreshold(pred.Label);
+            var threshold = GetCountThreshold(duration);
             bool withinPublishWindow = duration >= _config.MinPublishDurationSeconds && duration <= _config.MaxPublishDurationSeconds;
             bool countsGateMet = threshold > 0 && totalCounts >= threshold;
 
@@ -354,19 +326,9 @@ namespace Integrated.Runtime
 
         }
 
-        private int GetCountThreshold(string label)
+        private int GetCountThreshold(double durationSeconds)
         {
-            if (label.StartsWith("Dual", StringComparison.OrdinalIgnoreCase))
-            {
-                return _thresholds.N_min_15cm_dual;
-            }
-
-            if (label.StartsWith("Single", StringComparison.OrdinalIgnoreCase))
-            {
-                return _thresholds.N_min_15cm_single;
-            }
-
-            return 0;
+            return _thresholds.GetThreshold(durationSeconds, _config.MinPublishDurationSeconds, _config.MaxPublishDurationSeconds);
         }
 
         private void ScheduleRequestsIfNeeded()
@@ -578,17 +540,6 @@ namespace Integrated.Runtime
                 TimestampUtc = DateTimeOffset.UtcNow,
                 Message = message
             });
-        }
-
-        private void EmitThresholdWarningIfNeeded()
-        {
-            if (!_thresholdWarningPending)
-            {
-                return;
-            }
-
-            _thresholdWarningPending = false;
-            EmitStatus(LocalizationStatusCodes.TriggerPolicyThresholdsDefaulted, null, "Using default trigger thresholds.");
         }
 
         private void PublishFinalResult(RtLocalizationRequest req, RtLocalizationPrediction pred, double totalCounts, bool countsGateMet)

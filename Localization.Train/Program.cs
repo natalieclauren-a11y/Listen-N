@@ -598,6 +598,7 @@ internal static class Program
         pipeline.Save(outputDir);
 
         File.WriteAllText(Path.Combine(outputDir, "training_summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
+        WriteManifest(outputDir, config, triggerJsonOut);
         Console.WriteLine($"Artifacts saved to {outputDir}");
         Console.WriteLine($"Artifact schema: SchemaVersion={config.SchemaVersion}, SchemaHash={config.SchemaHash}");
 
@@ -3983,6 +3984,32 @@ internal static class Program
         return files;
     }
 
+    private static void WriteManifest(string outputDir, PipelineConfiguration config, string? triggerPolicyPath)
+    {
+        string policyPath = string.IsNullOrWhiteSpace(triggerPolicyPath)
+            ? "trigger_policy.json"
+            : Path.GetRelativePath(outputDir, triggerPolicyPath);
+
+        var manifest = new ArtifactManifest
+        {
+            SchemaVersion = config.SchemaVersion,
+            SchemaHash = config.SchemaHash,
+            TrainingDurationsSeconds = new[] { 30, 60 },
+            TriggerPolicyPath = policyPath,
+            ModelPaths = new Dictionary<string, string>
+            {
+                ["classifier"] = "classifier.zip",
+                ["single_regressor"] = "single_regressor",
+                ["dual_regressor"] = "dual_regressor",
+                ["mahalanobis"] = "mahalanobis.json",
+                ["pipeline_config"] = "pipeline_config.json"
+            }
+        };
+
+        var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(Path.Combine(outputDir, "manifest.json"), json);
+    }
+
     private static RegressionModelGroup TrainFallbackRegressor(ModelTrainer trainer, FeatureBuilder featureBuilder, double? durationOverride, IReadOnlyList<string> targetNames)
     {
         var channels = new double[FeatureBuilder.ChannelCount];
@@ -3990,5 +4017,14 @@ internal static class Program
         var features = featureBuilder.BuildFeatures(channels, duration).FeatureVector.Select(f => (float)f).ToArray();
         var targets = new double[targetNames.Count];
         return trainer.TrainMultiRegressor(new[] { features }, new[] { targets }, targetNames);
+    }
+
+    private sealed record ArtifactManifest
+    {
+        public required string SchemaVersion { get; init; }
+        public required string SchemaHash { get; init; }
+        public required IReadOnlyList<int> TrainingDurationsSeconds { get; init; }
+        public required string TriggerPolicyPath { get; init; }
+        public required IReadOnlyDictionary<string, string> ModelPaths { get; init; }
     }
 }

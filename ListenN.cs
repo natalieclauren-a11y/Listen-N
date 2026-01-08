@@ -1060,8 +1060,29 @@ namespace Listen_N
             }
 
             string artifactsDirectory = Path.Combine(Application.StartupPath, "artifacts");
-            string? policyArtifacts = Directory.Exists(artifactsDirectory) ? artifactsDirectory : null;
-            _localizationPolicy = new LocalizationEpisodePolicy(artifactsDirectory: policyArtifacts)
+            LocalizationArtifacts? artifacts = null;
+            if (Directory.Exists(artifactsDirectory))
+            {
+                try
+                {
+                    artifacts = LocalizationArtifactsLoader.Load(artifactsDirectory);
+                }
+                catch (LocalizationArtifactsException ex)
+                {
+                    string detail = ex.Reason == LocalizationArtifactsFailureReason.SchemaMismatch
+                        ? $" expected={ex.ExpectedHash} actual={ex.ActualHash}"
+                        : string.Empty;
+                    AppendMessage(null, new DebuggingMessage($"Refused: {ex.Reason}{detail}"), "localization > ");
+                }
+            }
+
+            if (artifacts == null)
+            {
+                AppendMessage(null, new DebuggingMessage($"Localization artifacts not found or invalid at {artifactsDirectory}."), "localization > ");
+                return;
+            }
+
+            _localizationPolicy = new LocalizationEpisodePolicy(artifacts.PolicyConfig, artifacts.Thresholds)
             {
                 AutoModeEnabled = _localizationAutoEnabled
             };
@@ -1095,18 +1116,11 @@ namespace Listen_N
                 EmitLocalizationStatus(force: true);
             };
 
-            if (Directory.Exists(artifactsDirectory))
-            {
-                _localizationWorker = new LocalizationWorker(artifactsDirectory, capacity: 4);
-                _localizationWorker.OnResult += HandleLocalizationResult;
-                _localizationWorkerCts = new CancellationTokenSource();
-                _localizationWorker.Start(_localizationWorkerCts.Token);
-                AppendMessage(null, new DebuggingMessage($"Localization worker started (artifacts: {artifactsDirectory})."), "localization > ");
-            }
-            else
-            {
-                AppendMessage(null, new DebuggingMessage($"Localization artifacts not found at {artifactsDirectory}."), "localization > ");
-            }
+            _localizationWorker = new LocalizationWorker(artifacts.Pipeline, capacity: 4);
+            _localizationWorker.OnResult += HandleLocalizationResult;
+            _localizationWorkerCts = new CancellationTokenSource();
+            _localizationWorker.Start(_localizationWorkerCts.Token);
+            AppendMessage(null, new DebuggingMessage($"Localization worker started (artifacts: {artifactsDirectory})."), "localization > ");
 
             _localizationStatusTimer = new System.Windows.Forms.Timer
             {

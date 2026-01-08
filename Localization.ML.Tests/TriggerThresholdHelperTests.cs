@@ -38,17 +38,19 @@ public class TriggerThresholdHelperTests
 
         var result = TriggerThresholdHelper.ComputeAndWrite(csvPath, jsonPath, 15.0, 2, 1);
 
-        Assert.Equal(250, result.Output.N_min_15cm_single);
-        Assert.Equal(250, result.Output.N_min_15cm_dual);
+        Assert.Equal(250, result.Output.Nmin_15cm_30s);
+        Assert.Equal(250, result.Output.Nmin_15cm_60s);
         Assert.False(result.Single.FailureToMeetTarget);
         Assert.False(result.Dual.FailureToMeetTarget);
         Assert.Equal(0.0, result.Dual.MedianAtThreshold);
         Assert.True(File.Exists(jsonPath));
 
         using var json = JsonDocument.Parse(File.ReadAllText(jsonPath));
-        Assert.Equal(250, json.RootElement.GetProperty("N_min_15cm_single").GetInt32());
-        Assert.Equal(250, json.RootElement.GetProperty("N_min_15cm_dual").GetInt32());
+        Assert.Equal(250, json.RootElement.GetProperty("Nmin_15cm_30s").GetInt32());
+        Assert.Equal(250, json.RootElement.GetProperty("Nmin_15cm_60s").GetInt32());
         Assert.Equal(15.0, json.RootElement.GetProperty("error_target_cm").GetDouble(), 3);
+        Assert.Equal(30.0, json.RootElement.GetProperty("MinPublishDurationSeconds").GetDouble(), 3);
+        Assert.Equal(60.0, json.RootElement.GetProperty("MaxPublishDurationSeconds").GetDouble(), 3);
     }
 
     private static string BuildSingleRow(int totalCounts, double predOffsetMeters, string label)

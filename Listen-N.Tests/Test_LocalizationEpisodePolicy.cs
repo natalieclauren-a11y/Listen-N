@@ -14,7 +14,7 @@ namespace Listen_N.Tests
         [Fact]
         public void EpisodeStartsAfterDebounceWhenConfusedPersists()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 2,
                 RecoverDebounceWindows = 2,
@@ -43,7 +43,7 @@ namespace Listen_N.Tests
         [Fact]
         public void AccumulatorResetsOnRecoveryDebounce()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 2,
                 RecoverDebounceWindows = 2
@@ -65,7 +65,7 @@ namespace Listen_N.Tests
         [Fact]
         public void HardStopSchedulesFinalRequestAndEndsEpisodeAfterResult()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 1,
                 RecoverDebounceWindows = 2,
@@ -108,7 +108,7 @@ namespace Listen_N.Tests
         [Fact]
         public void ProbeSchedulingBasedOnCountsIncrements()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 1,
                 RecoverDebounceWindows = 2,
@@ -146,7 +146,7 @@ namespace Listen_N.Tests
         [Fact]
         public void SingleStabilizesAndPublishesBeforeHardStop()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 1,
                 RecoverDebounceWindows = 2,
@@ -181,7 +181,7 @@ namespace Listen_N.Tests
         [Fact]
         public void DualOrderingSwapMaintainsStability()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 1,
                 RecoverDebounceWindows = 2,
@@ -214,7 +214,7 @@ namespace Listen_N.Tests
         [Fact]
         public void OscillatingPredictionsDoNotPublishUntilStable()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 1,
                 RecoverDebounceWindows = 2,
@@ -249,7 +249,7 @@ namespace Listen_N.Tests
         [Fact]
         public void OodAtHardStopPublishesRefusalAndResets()
         {
-            var policy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig
+            var policy = CreatePolicy(new LocalizationEpisodePolicyConfig
             {
                 ConfuseDebounceWindows = 1,
                 RecoverDebounceWindows = 2,
@@ -273,6 +273,11 @@ namespace Listen_N.Tests
             Assert.True(published!.IsOod);
             Assert.Equal("OOD at max duration", published.Reason);
             Assert.False(policy.IsEpisodeActive);
+        }
+
+        private static LocalizationEpisodePolicy CreatePolicy(LocalizationEpisodePolicyConfig config)
+        {
+            return new LocalizationEpisodePolicy(config, TriggerPolicyThresholds.Defaults);
         }
 
         private static RtWindowSummary BuildWindow(string state, double durationSeconds, double countsPerChannel, DateTimeOffset start)
