@@ -84,7 +84,20 @@ internal static class TriggerThresholdHelper
             singleResult.FailureToMeetTarget,
             singleResult.BestMedianErrorAtMaxCounts,
             dualResult.FailureToMeetTarget,
-            dualResult.BestMedianErrorAtMaxCounts);
+            dualResult.BestMedianErrorAtMaxCounts,
+            ConfuseDebounceWindows: 2,
+            RecoverDebounceWindows: 2,
+            QualityMin: 3.0,
+            CheckEveryCounts: 2000,
+            MinPublishDurationSeconds: 30.0,
+            MaxPublishDurationSeconds: 60.0,
+            ThrashWindowCount: 6,
+            ThrashChangeThreshold: 3,
+            StabilityToleranceCm: 5.0,
+            StabilityK: 3,
+            EarlyStopProbability: 0.98,
+            EarlyStopK: 2,
+            PublishProbabilityMin: 0.80);
 
         var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(triggerJsonOutPath, json);
@@ -536,8 +549,8 @@ internal static class TriggerThresholdHelper
 }
 
 internal sealed record TriggerThresholdOutput(
-    int N_min_15cm_single,
-    int N_min_15cm_dual,
+    int Nmin_15cm_30s,
+    int Nmin_15cm_60s,
     double error_target_cm,
     int bins,
     int min_samples_per_bin,
@@ -547,7 +560,20 @@ internal sealed record TriggerThresholdOutput(
     bool single_failure_to_meet_target,
     double single_best_median_error_cm,
     bool dual_failure_to_meet_target,
-    double dual_best_median_error_cm);
+    double dual_best_median_error_cm,
+    int ConfuseDebounceWindows,
+    int RecoverDebounceWindows,
+    double QualityMin,
+    int CheckEveryCounts,
+    double MinPublishDurationSeconds,
+    double MaxPublishDurationSeconds,
+    int ThrashWindowCount,
+    int ThrashChangeThreshold,
+    double StabilityToleranceCm,
+    int StabilityK,
+    double EarlyStopProbability,
+    int EarlyStopK,
+    double PublishProbabilityMin);
 
 internal sealed record ThresholdGroupResult(int Threshold, double MinCounts, double MaxCounts, double MedianAtThreshold, bool FailureToMeetTarget, double BestMedianErrorAtMaxCounts);
 

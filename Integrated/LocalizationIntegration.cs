@@ -88,7 +88,7 @@ namespace Integrated.Runtime
                 requestChannel,
                 policy,
                 pipeline,
-                new LocalizationEpisodePolicy(),
+                new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig(), TriggerPolicyThresholds.Defaults),
                 CreateWorkerChannel())
         {
         }

@@ -106,7 +106,7 @@ namespace Listen_N.Tests
             var bridge = LocalizationChannelBridge.Create();
             var pipeline = new FakePipeline();
             var workerChannel = Channel.CreateBounded<RtLocalizationRequest>(1);
-            var episodePolicy = new LocalizationEpisodePolicy();
+            var episodePolicy = new LocalizationEpisodePolicy(new LocalizationEpisodePolicyConfig(), TriggerPolicyThresholds.Defaults);
             var orchestrator = new LocalizationOrchestratorService(
                 bridge.Snapshots.Reader,
                 bridge.Requests,
