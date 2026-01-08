@@ -56,6 +56,20 @@ namespace Integrated.Runtime
         public string? Reason { get; init; }
     }
 
+    public sealed record LocalizationEvaluation
+    {
+        public required Guid EpisodeId { get; init; }
+        public required bool IsProbe { get; init; }
+        public required double DurationSeconds { get; init; }
+        public required double TotalCounts { get; init; }
+        public required string Label { get; init; }
+        public required double Probability { get; init; }
+        public required bool IsOod { get; init; }
+        public required double MahalanobisDistance { get; init; }
+        public required double Delta { get; init; }
+        public required int StableCount { get; init; }
+    }
+
     public static class LocalizationStatusCodes
     {
         public const string EpisodeStarted = "EpisodeStarted";
@@ -174,6 +188,9 @@ namespace Integrated.Runtime
         private int _stableCount;
         private double[]? _lastPrediction;
         private bool? _lastPredictionIsDual;
+        private RtWindowSummary? _lastWindowSummary;
+        private bool _lastIsConfused;
+        private double _lastDelta = double.NaN;
 
         public LocalizationEpisodePolicy(LocalizationEpisodePolicyConfig? config = null, string? artifactsDirectory = null)
         {
@@ -188,16 +205,35 @@ namespace Integrated.Runtime
         public event Action<LocalizationStatus>? OnStatus;
         public event Action<LocalizationPublishResult>? OnPublish;
 
+        public bool AutoModeEnabled { get; set; } = true;
+
         internal bool IsEpisodeActive => _episodeActive;
         internal double AccumulatedCountsTotal => _accumTotalCounts;
+        internal double AccumulatedDurationSeconds => _accumDuration;
+        internal bool LastIsConfused => _lastIsConfused;
+        internal double LastStabilityDelta => _lastDelta;
+        internal int StableCount => _stableCount;
+
+        public LocalizationEvaluation? LastEvaluation { get; private set; }
 
         public void AddWindow(RtWindowSummary w)
         {
+            _lastWindowSummary = w;
             EmitThresholdWarningIfNeeded();
             UpdateStateHistory(w.RtState);
 
             bool isConfused = IsConfused(w);
+            _lastIsConfused = isConfused;
             bool addedToEpisode = false;
+
+            if (!_episodeActive && !AutoModeEnabled)
+            {
+                _confusedStreak = 0;
+                _pendingDuration = 0;
+                _pendingTotalCounts = 0;
+                Array.Clear(_pendingCounts, 0, _pendingCounts.Length);
+                return;
+            }
 
             if (!_episodeActive)
             {
@@ -287,6 +323,7 @@ namespace Integrated.Runtime
             {
                 PublishFinalResult(req, pred, totalCounts, countsGateMet);
                 EmitStatus(LocalizationStatusCodes.EpisodeCompleted, _episodeId, "Final request completed.");
+                UpdateLastEvaluation(req, pred, totalCounts);
                 ResetEpisode();
                 return;
             }
@@ -294,10 +331,12 @@ namespace Integrated.Runtime
             if (!withinPublishWindow || pred.IsOutOfDistribution)
             {
                 ResetStabilityTracking();
+                UpdateLastEvaluation(req, pred, totalCounts);
                 return;
             }
 
             UpdateStabilityTracking(pred);
+            UpdateLastEvaluation(req, pred, totalCounts);
             if (!_publishCandidate && !countsGateMet)
             {
                 return;
@@ -369,7 +408,7 @@ namespace Integrated.Runtime
         {
             if (!_episodeActive)
             {
-                StartManualEpisode(DateTimeOffset.UtcNow);
+                StartManualEpisode(DateTimeOffset.UtcNow, _lastWindowSummary);
             }
 
             var request = BuildRequest(isProbe: true);
@@ -423,12 +462,21 @@ namespace Integrated.Runtime
 
         private void StartManualEpisode(DateTimeOffset episodeStart)
         {
+            StartManualEpisode(episodeStart, seedWindow: null);
+        }
+
+        private void StartManualEpisode(DateTimeOffset episodeStart, RtWindowSummary? seedWindow)
+        {
             _episodeId = Guid.NewGuid();
-            _episodeStartUtc = episodeStart;
-            _episodeCurrentEndUtc = episodeStart;
+            _episodeStartUtc = seedWindow?.WindowStartUtc ?? episodeStart;
+            _episodeCurrentEndUtc = seedWindow?.WindowEndUtc ?? episodeStart;
             _accumDuration = 0;
             _accumTotalCounts = 0;
             Array.Clear(_accumCounts, 0, _accumCounts.Length);
+            if (seedWindow is not null)
+            {
+                AccumulateWindow(seedWindow, _accumCounts, ref _accumDuration, ref _accumTotalCounts);
+            }
             _episodeActive = true;
             _confusedStreak = 0;
             _recoveryStreak = 0;
@@ -625,6 +673,7 @@ namespace Integrated.Runtime
                 _stableCount = 0;
                 _lastPrediction = CopyVector(pred.PredictedVector);
                 _lastPredictionIsDual = isDual;
+                _lastDelta = double.NaN;
                 return;
             }
 
@@ -633,6 +682,7 @@ namespace Integrated.Runtime
                 : ComputeSingleDelta(_lastPrediction, pred.PredictedVector);
 
             _stableCount = delta < _config.StabilityToleranceCm ? _stableCount + 1 : 0;
+            _lastDelta = delta;
             _lastPrediction = CopyVector(pred.PredictedVector);
             _lastPredictionIsDual = isDual;
         }
@@ -642,6 +692,24 @@ namespace Integrated.Runtime
             _stableCount = 0;
             _lastPrediction = null;
             _lastPredictionIsDual = null;
+            _lastDelta = double.NaN;
+        }
+
+        private void UpdateLastEvaluation(LocalizationRequest req, LocalizationPrediction pred, double totalCounts)
+        {
+            LastEvaluation = new LocalizationEvaluation
+            {
+                EpisodeId = req.EpisodeId,
+                IsProbe = req.IsProbe,
+                DurationSeconds = req.Row.DurationSeconds,
+                TotalCounts = totalCounts,
+                Label = pred.Label,
+                Probability = pred.ClassifierProbability,
+                IsOod = pred.IsOutOfDistribution,
+                MahalanobisDistance = pred.MahalanobisDistance,
+                Delta = _lastDelta,
+                StableCount = _stableCount
+            };
         }
 
         private bool ShouldPublish(LocalizationPrediction pred)
