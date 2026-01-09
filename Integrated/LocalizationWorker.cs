@@ -57,6 +57,7 @@ namespace Integrated.Runtime
         }
 
         public event Action<RtLocalizationRequest, RtLocalizationPrediction>? OnResult;
+        public event Action<Exception>? OnWorkerFaulted;
 
         public Task Start(CancellationToken cancellationToken)
         {
@@ -123,6 +124,30 @@ namespace Integrated.Runtime
             }
         }
 
+        public bool TryEnqueue(RtLocalizationRequest request, out LocalizationWorkerEnqueueResult result)
+        {
+            if (!request.IsManual && IsInCooldown())
+            {
+                result = LocalizationWorkerEnqueueResult.SuppressedCooldown;
+                return false;
+            }
+
+            if (_channel.Reader.Completion.IsCompleted)
+            {
+                result = LocalizationWorkerEnqueueResult.WorkerUnavailable;
+                return false;
+            }
+
+            if (_channel.Writer.TryWrite(request))
+            {
+                result = LocalizationWorkerEnqueueResult.Enqueued;
+                return true;
+            }
+
+            result = LocalizationWorkerEnqueueResult.QueueSaturated;
+            return false;
+        }
+
         private async Task RunAsync(CancellationToken cancellationToken)
         {
             try
@@ -140,6 +165,10 @@ namespace Integrated.Runtime
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex)
+            {
+                OnWorkerFaulted?.Invoke(ex);
             }
             finally
             {
@@ -404,5 +433,13 @@ namespace Integrated.Runtime
                 };
             }
         }
+    }
+
+    public enum LocalizationWorkerEnqueueResult
+    {
+        Enqueued,
+        QueueSaturated,
+        WorkerUnavailable,
+        SuppressedCooldown
     }
 }

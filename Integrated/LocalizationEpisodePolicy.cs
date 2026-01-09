@@ -202,6 +202,7 @@ namespace Integrated.Runtime
 
         public LocalizationEvaluation? LastEvaluation { get; private set; }
         public LocalizationDecisionRecord? LatestDecisionRecord => _latestDecisionRecord;
+        public Guid RunId { get; set; }
 
         public void AddWindow(RtWindowSummary w)
         {
@@ -845,6 +846,7 @@ namespace Integrated.Runtime
 
             return new LocalizationDecisionRecord
             {
+                RunId = RunId,
                 TimestampUtc = DateTime.UtcNow,
                 DecisionKind = kind,
                 ReasonCode = reason,
@@ -856,6 +858,21 @@ namespace Integrated.Runtime
                 MlContext = mlContext,
                 Result = result
             };
+        }
+
+        public void EmitBackpressureDecision(LocalizationDecisionReasonCode reason, LocalizationDecisionOutcome outcome)
+        {
+            var kind = outcome == LocalizationDecisionOutcome.Deferred
+                ? LocalizationDecisionKind.Defer
+                : LocalizationDecisionKind.Refuse;
+
+            EmitDecision(BuildDecisionRecord(
+                kind,
+                reason,
+                outcome,
+                window: _lastWindowSummary,
+                request: null,
+                prediction: null));
         }
 
         private LocalizationDecisionRtContext BuildRtContext(RtWindowSummary? window, RtLocalizationRequest? request)

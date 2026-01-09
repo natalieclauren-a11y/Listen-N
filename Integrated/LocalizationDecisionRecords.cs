@@ -36,6 +36,7 @@ namespace Integrated.Contracts
         Deferred_WaitingForDurationMin,
         Deferred_WaitingForStability,
         Deferred_WaitingForProbability,
+        Deferred_Backpressure,
         Refused_OOD,
         Refused_OODAtMaxDuration,
         Refused_InvalidPredictionShape,
@@ -43,6 +44,8 @@ namespace Integrated.Contracts
         Refused_Cancelled,
         Refused_ArtifactsNotLoaded,
         Refused_MlException,
+        Refused_RuntimeMisconfigured,
+        Refused_QueueSaturated,
         Refused_Unknown,
         Published_Single,
         Published_Dual,
@@ -53,6 +56,7 @@ namespace Integrated.Contracts
 
     public sealed record LocalizationDecisionRecord
     {
+        public required Guid RunId { get; init; }
         public required DateTime TimestampUtc { get; init; }
         public required LocalizationDecisionKind DecisionKind { get; init; }
         public required LocalizationDecisionReasonCode ReasonCode { get; init; }
