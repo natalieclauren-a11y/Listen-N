@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using System.Diagnostics;
 using Localization.ML;
 using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
@@ -150,6 +151,7 @@ namespace Integrated.Runtime
         {
             CancellationTokenSource? timeoutCts = null;
             CancellationTokenSource? linkedCts = null;
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 var tokens = new List<CancellationToken> { workerToken, request.CancellationToken };
@@ -160,25 +162,26 @@ namespace Integrated.Runtime
                 }
 
                 linkedCts = CancellationTokenSource.CreateLinkedTokenSource(tokens.ToArray());
-                return _localizer.Predict(request, linkedCts.Token);
+                var prediction = _localizer.Predict(request, linkedCts.Token);
+                return prediction with { InferenceTimeMs = stopwatch.Elapsed.TotalMilliseconds };
             }
             catch (OperationCanceledException)
             {
                 if (timeoutCts?.IsCancellationRequested == true)
                 {
-                    return CreateRefusal("Timeout");
+                    return CreateRefusal("Timeout", stopwatch.Elapsed.TotalMilliseconds);
                 }
 
                 if (workerToken.IsCancellationRequested || request.CancellationToken.IsCancellationRequested)
                 {
-                    return CreateRefusal("Cancelled");
+                    return CreateRefusal("Cancelled", stopwatch.Elapsed.TotalMilliseconds);
                 }
 
-                return CreateRefusal("Cancelled");
+                return CreateRefusal("Cancelled", stopwatch.Elapsed.TotalMilliseconds);
             }
             catch (Exception ex)
             {
-                return CreateRefusal(IsArtifactsNotLoaded(ex) ? "ArtifactsNotLoaded" : "MlException");
+                return CreateRefusal(IsArtifactsNotLoaded(ex) ? "ArtifactsNotLoaded" : "MlException", stopwatch.Elapsed.TotalMilliseconds);
             }
             finally
             {
@@ -187,8 +190,11 @@ namespace Integrated.Runtime
             }
         }
 
-        private RtLocalizationPrediction CreateRefusal(string reason)
+        private RtLocalizationPrediction CreateRefusal(string reason, double inferenceTimeMs)
         {
+            string? modelId = _localizer is PipelineLocalizer pipelineLocalizer
+                ? pipelineLocalizer.ModelId
+                : null;
             return new RtLocalizationPrediction
             {
                 IsOutOfDistribution = false,
@@ -196,7 +202,9 @@ namespace Integrated.Runtime
                 ClassifierProbability = double.NaN,
                 Label = "Unknown",
                 PredictedVector = Array.Empty<double>(),
-                Reason = reason
+                Reason = reason,
+                InferenceTimeMs = inferenceTimeMs,
+                ModelId = modelId
             };
         }
 
@@ -358,6 +366,7 @@ namespace Integrated.Runtime
         private sealed class PipelineLocalizer : ILocalizer
         {
             private readonly LocalizationPipeline _pipeline;
+            public string ModelId => _pipeline.ModelId;
 
             public PipelineLocalizer(string artifactsDirectory)
             {
@@ -390,7 +399,8 @@ namespace Integrated.Runtime
                     MahalanobisDistance = prediction.Diagnostics.MahalanobisDistance,
                     ClassifierProbability = prediction.Probability,
                     Label = prediction.Label,
-                    PredictedVector = prediction.Coordinates.ToArray()
+                    PredictedVector = prediction.Coordinates.ToArray(),
+                    ModelId = _pipeline.ModelId
                 };
             }
         }
