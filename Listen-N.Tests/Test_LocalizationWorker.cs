@@ -156,7 +156,7 @@ namespace Listen_N.Tests
 
             await Task.Delay(100);
             Assert.Equal(1, localizer.CallCount);
-            Assert.Equal(1, results.Count);
+            Assert.Single(results);
 
             worker.Enqueue(CreateRequest(isProbe: true, isManual: true, sequence: 5));
             await AwaitResultCountAsync(results, expectedCount: 2);
