@@ -19,6 +19,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Data;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
 using System.Xml;
 using Listen_N;
@@ -38,6 +39,7 @@ using System.Text.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Integrated.Contracts;
+using Integrated.Runtime;
 using Integrated.Runtime;
 using CnLocalizationRequest = Integrated.Contracts.LocalizationRequest;
 using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
@@ -128,6 +130,13 @@ namespace Listen_N
         private string? _lastLocalizationStatus;
         private LocalizationDecisionRecord? _lastLocalizationDecisionRecord;
         private bool _localizationAutoEnabled = true;
+        private readonly object _localizationStatusLock = new();
+        private LocalizationOperatorStatus? _localizationStatusSnapshot;
+        private LocalizationHealthTracker? _localizationHealth;
+        private LocalizationRuntimeConfig? _localizationRuntimeConfig;
+        private LocalizationMlRequestLimiter? _localizationRequestLimiter;
+        private LocalizationDecisionLogWriter? _localizationDecisionLog;
+        private Guid _localizationRunId = Guid.Empty;
 
 
 
@@ -1060,26 +1069,53 @@ namespace Listen_N
                 return;
             }
 
-            string artifactsDirectory = Path.Combine(System.Windows.Forms.Application.StartupPath, "artifacts");
-            LocalizationArtifacts? artifacts = null;
-            if (Directory.Exists(artifactsDirectory))
+            _localizationRunId = Guid.NewGuid();
+            string baseDirectory = System.Windows.Forms.Application.StartupPath;
+            string runtimeConfigPath = Path.Combine(baseDirectory, "localization_runtime_config.json");
+            LocalizationRuntimeConfig? runtimeConfig = null;
+            LocalizationRuntimeValidationResult? validation = null;
+
+            try
             {
-                try
-                {
-                    artifacts = LocalizationArtifactsLoader.Load(artifactsDirectory);
-                }
-                catch (LocalizationArtifactsException ex)
-                {
-                    string detail = ex.Reason == LocalizationArtifactsFailureReason.SchemaMismatch
-                        ? $" expected={ex.ExpectedHash} actual={ex.ActualHash}"
-                        : string.Empty;
-                    AppendMessage(null, new DebuggingMessage($"Refused: {ex.Reason}{detail}"), "localization > ");
-                }
+                runtimeConfig = LocalizationRuntimeConfig.Load(runtimeConfigPath);
+                validation = runtimeConfig.Validate(baseDirectory);
+            }
+            catch (Exception ex)
+            {
+                DisableLocalization($"Runtime config missing or invalid: {ex.Message}");
+                return;
             }
 
-            if (artifacts == null)
+            if (validation is null || !validation.IsValid)
             {
-                AppendMessage(null, new DebuggingMessage($"Localization artifacts not found or invalid at {artifactsDirectory}."), "localization > ");
+                string details = validation is null ? "Unknown validation failure." : string.Join("; ", validation.Errors);
+                DisableLocalization($"Runtime config validation failed: {details}");
+                return;
+            }
+
+            _localizationRuntimeConfig = runtimeConfig;
+            _localizationHealth = new LocalizationHealthTracker(
+                runtimeConfig.DegradedRefusalThreshold,
+                runtimeConfig.DegradedQueueSaturationThreshold);
+            _localizationDecisionLog = new LocalizationDecisionLogWriter(baseDirectory, _localizationRunId, runtimeConfig.DecisionLoggingEnabled);
+
+            string artifactsDirectory = validation.ResolvedArtifactsDirectory ?? runtimeConfig.ArtifactsDirectory;
+            LocalizationArtifacts? artifacts = null;
+            try
+            {
+                artifacts = LocalizationArtifactsLoader.Load(artifactsDirectory);
+            }
+            catch (LocalizationArtifactsException ex)
+            {
+                string detail = ex.Reason == LocalizationArtifactsFailureReason.SchemaMismatch
+                    ? $" expected={ex.ExpectedHash} actual={ex.ActualHash}"
+                    : string.Empty;
+                DisableLocalization($"Artifacts invalid: {ex.Reason}{detail}");
+                return;
+            }
+            catch (Exception ex)
+            {
+                DisableLocalization($"Artifacts failed to load: {ex.Message}");
                 return;
             }
 
@@ -1087,6 +1123,7 @@ namespace Listen_N
             {
                 AutoModeEnabled = _localizationAutoEnabled
             };
+            _localizationPolicy.RunId = _localizationRunId;
 
             _localizationPolicy.OnRequestMl += request =>
             {
@@ -1096,7 +1133,7 @@ namespace Listen_N
                     return;
                 }
 
-                _localizationWorker.Enqueue(request);
+                _localizationRequestLimiter?.HandleRequest(request);
             };
 
             _localizationPolicy.OnStatus += status =>
@@ -1120,14 +1157,23 @@ namespace Listen_N
             _localizationPolicy.OnDecisionRecord += record =>
             {
                 _lastLocalizationDecisionRecord = record;
+                _localizationRequestLimiter?.ObserveDecision(record);
+                _localizationHealth?.RecordDecision(record);
                 LogLocalizationDecisionRecord(record);
+                UpdateLocalizationStatusSnapshot(record);
             };
 
-            _localizationWorker = new LocalizationWorker(artifacts.Pipeline, capacity: 4);
+            _localizationWorker = new LocalizationWorker(artifacts.Pipeline, capacity: runtimeConfig.MaxMlQueueDepth);
             _localizationWorker.OnResult += HandleLocalizationResult;
+            _localizationWorker.OnWorkerFaulted += _ =>
+            {
+                _localizationHealth?.MarkUnavailable();
+            };
             _localizationWorkerCts = new CancellationTokenSource();
             _localizationWorker.Start(_localizationWorkerCts.Token);
             AppendMessage(null, new DebuggingMessage($"Localization worker started (artifacts: {artifactsDirectory})."), "localization > ");
+
+            _localizationRequestLimiter = new LocalizationMlRequestLimiter(_localizationWorker, _localizationPolicy, runtimeConfig, _localizationHealth);
 
             _localizationStatusTimer = new System.Windows.Forms.Timer
             {
@@ -1140,6 +1186,7 @@ namespace Listen_N
             {
                 _localizationStatusTimer?.Stop();
                 _localizationWorkerCts?.Cancel();
+                _localizationDecisionLog?.Dispose();
             };
         }
 
@@ -1180,7 +1227,7 @@ namespace Listen_N
             }
 
             var request = _localizationPolicy.BuildManualProbeRequest();
-            _localizationWorker.Enqueue(request);
+            _localizationRequestLimiter?.HandleRequest(request);
             AppendMessage(null, new DebuggingMessage($"Manual probe enqueued for episode {request.EpisodeId}."), "localization > ");
             EmitLocalizationStatus(force: true);
         }
@@ -1214,14 +1261,72 @@ namespace Listen_N
 
         private void LogLocalizationDecisionRecord(LocalizationDecisionRecord record)
         {
-            var options = new JsonSerializerOptions
+            _localizationDecisionLog?.Write(record);
+        }
+
+        private void DisableLocalization(string message)
+        {
+            AppendMessage(null, new DebuggingMessage(message), "localization > ");
+            _localizationHealth ??= new LocalizationHealthTracker(3, 3);
+            _localizationHealth.MarkDisabled();
+            _localizationDecisionLog ??= new LocalizationDecisionLogWriter(System.Windows.Forms.Application.StartupPath, _localizationRunId, enabled: true);
+            var record = LocalizationDecisionRecordFactory.CreateRuntimeMisconfigured(_localizationRunId, message);
+            _lastLocalizationDecisionRecord = record;
+            LogLocalizationDecisionRecord(record);
+            UpdateLocalizationStatusSnapshot(record);
+        }
+
+        private void UpdateLocalizationStatusSnapshot(LocalizationDecisionRecord record)
+        {
+            var health = _localizationHealth?.State ?? LocalizationHealthState.Disabled;
+            bool episodeActive = _localizationPolicy?.IsEpisodeActive ?? false;
+            double duration = _localizationPolicy?.AccumulatedDurationSeconds ?? 0;
+            double counts = _localizationPolicy?.AccumulatedCountsTotal ?? 0;
+            string rtState = _lastWindowSummary?.RtState ?? "n/a";
+            var snapshot = new LocalizationOperatorStatus
             {
-                NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
-                WriteIndented = false
+                RunId = _localizationRunId,
+                Health = health,
+                EpisodeActive = episodeActive,
+                EpisodeId = episodeActive ? _localizationPolicy?.LatestDecisionRecord?.EpisodeId : record.EpisodeId,
+                AccumulatedDurationSec = duration,
+                AccumulatedCounts = (int)Math.Round(counts),
+                RtState = rtState,
+                LastDecisionKind = record.DecisionKind.ToString(),
+                LastReasonCode = record.ReasonCode.ToString(),
+                LastDecisionUtc = record.TimestampUtc,
+                LastOutcomeLabel = record.MlContext?.OutcomeLabel,
+                LastProbability = record.MlContext?.ClassifierProbability,
+                LastIsOod = record.MlContext?.IsOutOfDistribution
             };
 
-            string json = JsonSerializer.Serialize(record, options);
-            System.IO.File.AppendAllText("localization_decisions.log", json + Environment.NewLine);
+            lock (_localizationStatusLock)
+            {
+                _localizationStatusSnapshot = snapshot;
+            }
+        }
+
+        public LocalizationOperatorStatus GetLocalizationStatus()
+        {
+            lock (_localizationStatusLock)
+            {
+                return _localizationStatusSnapshot ?? new LocalizationOperatorStatus
+                {
+                    RunId = _localizationRunId,
+                    Health = _localizationHealth?.State ?? LocalizationHealthState.Disabled,
+                    EpisodeActive = _localizationPolicy?.IsEpisodeActive ?? false,
+                    EpisodeId = _localizationPolicy?.LatestDecisionRecord?.EpisodeId,
+                    AccumulatedDurationSec = _localizationPolicy?.AccumulatedDurationSeconds ?? 0,
+                    AccumulatedCounts = (int)Math.Round(_localizationPolicy?.AccumulatedCountsTotal ?? 0),
+                    RtState = _lastWindowSummary?.RtState ?? "n/a",
+                    LastDecisionKind = _lastLocalizationDecisionRecord?.DecisionKind.ToString() ?? string.Empty,
+                    LastReasonCode = _lastLocalizationDecisionRecord?.ReasonCode.ToString() ?? string.Empty,
+                    LastDecisionUtc = _lastLocalizationDecisionRecord?.TimestampUtc ?? DateTime.UtcNow,
+                    LastOutcomeLabel = _lastLocalizationDecisionRecord?.MlContext?.OutcomeLabel,
+                    LastProbability = _lastLocalizationDecisionRecord?.MlContext?.ClassifierProbability,
+                    LastIsOod = _lastLocalizationDecisionRecord?.MlContext?.IsOutOfDistribution
+                };
+            }
         }
 
         private void EmitLocalizationStatus(bool force)
@@ -1360,6 +1465,69 @@ namespace Listen_N
                     ClampCommandsIndex();
                     textBoxCommands.Text = commandsSent[commandsSentIndex];
                     textBoxCommands.SelectionStart = textBoxCommands.Text.Length;
+                }
+            }
+        }
+
+        private sealed class LocalizationDecisionLogWriter : IDisposable
+        {
+            private readonly object _lock = new();
+            private readonly StreamWriter? _writer;
+            private readonly JsonSerializerOptions _options;
+            private bool _disposed;
+
+            public LocalizationDecisionLogWriter(string baseDirectory, Guid runId, bool enabled)
+            {
+                _options = new JsonSerializerOptions
+                {
+                    NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
+                    WriteIndented = false
+                };
+
+                if (!enabled)
+                {
+                    return;
+                }
+
+                Directory.CreateDirectory(baseDirectory);
+                string path = Path.Combine(baseDirectory, $"localization_decisions_{runId}.log");
+                _writer = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read))
+                {
+                    AutoFlush = true
+                };
+            }
+
+            public void Write(LocalizationDecisionRecord record)
+            {
+                if (_writer is null)
+                {
+                    return;
+                }
+
+                lock (_lock)
+                {
+                    if (_disposed)
+                    {
+                        return;
+                    }
+
+                    string json = JsonSerializer.Serialize(record, _options);
+                    _writer.WriteLine(json);
+                }
+            }
+
+            public void Dispose()
+            {
+                lock (_lock)
+                {
+                    if (_disposed)
+                    {
+                        return;
+                    }
+
+                    _writer?.Flush();
+                    _writer?.Dispose();
+                    _disposed = true;
                 }
             }
         }

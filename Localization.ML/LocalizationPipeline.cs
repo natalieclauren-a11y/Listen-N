@@ -160,7 +160,8 @@ public sealed class LocalizationPipeline
             }
         }
 
-        var modelId = ComputeModelId(configText);
+        var identity = PipelineIdentity.Load(directory);
+        var modelId = PipelineIdentity.ComputeModelId(identity);
         return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config, modelId);
     }
 

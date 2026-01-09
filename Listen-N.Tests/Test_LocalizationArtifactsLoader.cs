@@ -129,6 +129,18 @@ public sealed class LocalizationArtifactsLoaderTests
 
         File.WriteAllText(Path.Combine(artifactsDir, "pipeline_config.json"),
             JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+
+        var identity = new PipelineIdentity
+        {
+            SchemaHash = config.SchemaHash,
+            FeatureHash = "feature-hash",
+            TrainingDurationSec = 30,
+            TrainingDatasetFingerprint = "dataset-fingerprint",
+            BuildTimestampUtc = DateTime.UtcNow.ToString("O"),
+            CommitHash = "test"
+        };
+        File.WriteAllText(Path.Combine(artifactsDir, "pipeline_identity.json"),
+            JsonSerializer.Serialize(identity, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     private static void WriteRegressorGroup(MLContext mlContext, string directory)

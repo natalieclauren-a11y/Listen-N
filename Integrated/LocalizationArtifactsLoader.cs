@@ -31,7 +31,10 @@ public enum LocalizationArtifactsFailureReason
     ManifestInvalid,
     SchemaMismatch,
     PolicyMissing,
-    PolicyInvalid
+    PolicyInvalid,
+    IdentityMissing,
+    IdentityInvalid,
+    PipelineInvalid
 }
 
 public sealed class LocalizationArtifactsException : Exception
@@ -152,7 +155,28 @@ public static class LocalizationArtifactsLoader
                 "Trigger policy values are invalid.",
                 innerException: ex);
         }
-        var pipeline = LocalizationPipeline.Load(directory);
+        LocalizationPipeline pipeline;
+        try
+        {
+            pipeline = LocalizationPipeline.Load(directory);
+        }
+        catch (LocalizationPipelineIdentityException ex)
+        {
+            var reason = ex.Reason == LocalizationPipelineIdentityFailureReason.Missing
+                ? LocalizationArtifactsFailureReason.IdentityMissing
+                : LocalizationArtifactsFailureReason.IdentityInvalid;
+            throw new LocalizationArtifactsException(
+                reason,
+                ex.Message,
+                innerException: ex);
+        }
+        catch (Exception ex)
+        {
+            throw new LocalizationArtifactsException(
+                LocalizationArtifactsFailureReason.PipelineInvalid,
+                "Failed to load localization pipeline.",
+                innerException: ex);
+        }
 
         return new LocalizationArtifacts
         {

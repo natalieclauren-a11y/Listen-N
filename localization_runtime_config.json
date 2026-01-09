@@ -1,0 +1,10 @@
+{
+  "ArtifactsDirectory": "artifacts",
+  "TriggerPolicyPath": "trigger_policy.json",
+  "AllowedSchemaHashes": ["v1", "v1.1"],
+  "SupportedTrainingDurationsSec": [30, 60],
+  "MaxMlQueueDepth": 1,
+  "MaxMlRequestsPerEpisode": 2,
+  "DecisionLoggingEnabled": true,
+  "FailFastOnStartupError": true
+}
