@@ -338,12 +338,17 @@ namespace Integrated.Runtime
                     continue;
                 }
 
+                if (existing.EpisodeId != request.EpisodeId)
+                {
+                    continue;
+                }
+
                 if (existing.IsProbe != request.IsProbe)
                 {
                     continue;
                 }
 
-                if (existing.Sequence <= sequence)
+                if (existing.Sequence < sequence)
                 {
                     pending.RemoveAt(i);
                 }
