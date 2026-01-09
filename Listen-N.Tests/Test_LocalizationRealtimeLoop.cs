@@ -85,7 +85,7 @@ namespace Listen_N.Tests
 
         private sealed class StableLocalizer : RtILocalizer
         {
-            public RtLocalizationPrediction Predict(RtLocalizationRequest request)
+            public RtLocalizationPrediction Predict(RtLocalizationRequest request, CancellationToken cancellationToken)
             {
                 return new RtLocalizationPrediction
                 {

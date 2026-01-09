@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Integrated.Contracts;
 using RtLocalizationPrediction = Integrated.Runtime.LocalizationPrediction;
 using RtLocalizationRequest = Integrated.Runtime.LocalizationRequest;
@@ -18,6 +19,9 @@ namespace Integrated.Runtime
     {
         public required Guid EpisodeId { get; init; }
         public required bool IsProbe { get; init; }
+        public bool IsManual { get; init; }
+        public long Sequence { get; init; } = DateTimeOffset.UtcNow.UtcTicks;
+        public CancellationToken CancellationToken { get; init; } = CancellationToken.None;
         public required LocalizationRow Row { get; init; }
         public required DateTimeOffset EpisodeStartUtc { get; init; }
         public required DateTimeOffset EpisodeCurrentEndUtc { get; init; }
@@ -29,7 +33,8 @@ namespace Integrated.Runtime
         public required double MahalanobisDistance { get; init; }
         public required double ClassifierProbability { get; init; }
         public required string Label { get; init; }
-        public required double[] PredictedVector { get; init; }
+        public required double[]? PredictedVector { get; init; }
+        public string? Reason { get; init; }
     }
 
     public sealed record LocalizationStatus
@@ -169,6 +174,7 @@ namespace Integrated.Runtime
         private RtWindowSummary? _lastWindowSummary;
         private bool _lastIsConfused;
         private double _lastDelta = double.NaN;
+        private long _requestSequence;
 
         public LocalizationEpisodePolicy(LocalizationEpisodePolicyConfig config, TriggerPolicyThresholds thresholds)
         {
@@ -287,6 +293,12 @@ namespace Integrated.Runtime
             var threshold = GetCountThreshold(duration);
             bool withinPublishWindow = duration >= _config.MinPublishDurationSeconds && duration <= _config.MaxPublishDurationSeconds;
             bool countsGateMet = threshold > 0 && totalCounts >= threshold;
+            if (!string.IsNullOrWhiteSpace(pred.Reason))
+            {
+                ResetStabilityTracking();
+                UpdateLastEvaluation(req, pred, totalCounts);
+                return;
+            }
 
             if (withinPublishWindow && !pred.IsOutOfDistribution && countsGateMet && !_publishCandidate)
             {
@@ -376,14 +388,14 @@ namespace Integrated.Runtime
                 StartManualEpisode(DateTimeOffset.UtcNow, _lastWindowSummary);
             }
 
-            var request = BuildRequest(isProbe: true);
+            var request = BuildRequest(isProbe: true, isManual: true);
             _probePending = true;
             _countsAtLastRequest = _accumTotalCounts;
             EmitStatus(LocalizationStatusCodes.ProbeRequested, _episodeId, "Manual probe requested.");
             return request;
         }
 
-        private RtLocalizationRequest BuildRequest(bool isProbe)
+        private RtLocalizationRequest BuildRequest(bool isProbe, bool isManual = false)
         {
             var channels = new double[_accumCounts.Length];
             Array.Copy(_accumCounts, channels, channels.Length);
@@ -399,6 +411,8 @@ namespace Integrated.Runtime
             {
                 EpisodeId = _episodeId,
                 IsProbe = isProbe,
+                IsManual = isManual,
+                Sequence = Interlocked.Increment(ref _requestSequence),
                 Row = row,
                 EpisodeStartUtc = _episodeStartUtc,
                 EpisodeCurrentEndUtc = _episodeCurrentEndUtc
