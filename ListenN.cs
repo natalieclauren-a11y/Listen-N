@@ -126,6 +126,7 @@ namespace Listen_N
         private RtWindowSummary? _lastWindowSummary;
         private LocalizationEvaluation? _lastLocalizationEvaluation;
         private string? _lastLocalizationStatus;
+        private LocalizationDecisionRecord? _lastLocalizationDecisionRecord;
         private bool _localizationAutoEnabled = true;
 
 
@@ -1116,6 +1117,12 @@ namespace Listen_N
                 EmitLocalizationStatus(force: true);
             };
 
+            _localizationPolicy.OnDecisionRecord += record =>
+            {
+                _lastLocalizationDecisionRecord = record;
+                LogLocalizationDecisionRecord(record);
+            };
+
             _localizationWorker = new LocalizationWorker(artifacts.Pipeline, capacity: 4);
             _localizationWorker.OnResult += HandleLocalizationResult;
             _localizationWorkerCts = new CancellationTokenSource();
@@ -1203,6 +1210,18 @@ namespace Listen_N
                     $"mahal={result.MahalanobisDistance:F2} delta={delta} stable={stableCount} " +
                     $"lowStatistics={result.LowStatistics} reason={reason}"),
                 "localization > ");
+        }
+
+        private void LogLocalizationDecisionRecord(LocalizationDecisionRecord record)
+        {
+            var options = new JsonSerializerOptions
+            {
+                NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
+                WriteIndented = false
+            };
+
+            string json = JsonSerializer.Serialize(record, options);
+            System.IO.File.AppendAllText("localization_decisions.log", json + Environment.NewLine);
         }
 
         private void EmitLocalizationStatus(bool force)

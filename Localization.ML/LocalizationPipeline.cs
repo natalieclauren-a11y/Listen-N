@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Numerics;
 using Microsoft.ML;
@@ -18,7 +20,9 @@ public sealed class LocalizationPipeline
     private readonly MahalanobisScorer _mahalanobis;
     private readonly PipelineConfiguration _config;
 
-    public LocalizationPipeline(MLContext mlContext, FeatureBuilder featureBuilder, ITransformer classifier, RegressionModelGroup singleRegressor, RegressionModelGroup dualRegressor, MahalanobisScorer mahalanobis, PipelineConfiguration config)
+    public string ModelId { get; }
+
+    public LocalizationPipeline(MLContext mlContext, FeatureBuilder featureBuilder, ITransformer classifier, RegressionModelGroup singleRegressor, RegressionModelGroup dualRegressor, MahalanobisScorer mahalanobis, PipelineConfiguration config, string? modelId = null)
     {
         _mlContext = mlContext;
         _featureBuilder = featureBuilder;
@@ -27,6 +31,9 @@ public sealed class LocalizationPipeline
         _dualRegressor = dualRegressor;
         _mahalanobis = mahalanobis;
         _config = config;
+        ModelId = string.IsNullOrWhiteSpace(modelId)
+            ? ComputeModelId(JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }))
+            : modelId;
     }
 
     public PredictionResult Predict(LocalizationRow row, IReadOnlyList<int>? channelPermutation = null)
@@ -153,7 +160,21 @@ public sealed class LocalizationPipeline
             }
         }
 
-        return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config);
+        var modelId = ComputeModelId(configText);
+        return new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config, modelId);
+    }
+
+    public static string ComputeModelId(string configJson)
+    {
+        if (string.IsNullOrWhiteSpace(configJson))
+        {
+            return string.Empty;
+        }
+
+        using var sha = SHA256.Create();
+        var bytes = System.Text.Encoding.UTF8.GetBytes(configJson);
+        var hash = sha.ComputeHash(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private static double[] ExtractOodFeatures(IReadOnlyList<double> features)
