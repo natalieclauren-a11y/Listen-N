@@ -68,7 +68,50 @@ namespace Listen_N
         }
 
         public event Action<Estimate>? OnEstimate; // callback for new estimates
+        public event Action<ReplayStep>? OnReplayStep; // callback for detailed replay estimates
         public event Action<RtWindowSummary>? OnWindowSummary; // callback for per-window summaries
+
+        public sealed class ReplayStep
+        {
+            public long NowUs { get; init; }
+            public double WindowSec { get; init; }
+            public int SelectedGateUs { get; init; }
+            public int SelectedGateIndex { get; init; }
+            public int SignificantGateIndex { get; init; }
+            public int PlateauGateIndex { get; init; }
+            public int PendingGateIndex { get; init; }
+            public int GateConfirmations { get; init; }
+            public int GateConfirmRequired { get; init; }
+            public bool GateFrozenInHold { get; init; }
+            public string State { get; init; } = string.Empty;
+            public bool HoldFlag { get; init; }
+            public bool SinglesChange { get; init; }
+            public bool CorrelationChange { get; init; }
+            public bool PageHinkleyAlarm { get; init; }
+            public double PageHinkleyMean { get; init; }
+            public double PageHinkleyCum { get; init; }
+            public double PageHinkleyZyMean { get; init; }
+            public double PageHinkleyZyCum { get; init; }
+            public double TauHatSec { get; init; }
+            public double CorrFitRms { get; init; }
+            public double[] CorrResiduals { get; init; } = Array.Empty<double>();
+            public bool ModelMismatch { get; init; }
+            public bool InsufficientStatistics { get; init; }
+            public bool IllConditionedCovariance { get; init; }
+            public bool[] GateValid { get; init; } = Array.Empty<bool>();
+            public bool[] GateSignificant { get; init; } = Array.Empty<bool>();
+            public double[] GateY { get; init; } = Array.Empty<double>();
+            public double[] GateSigmaY { get; init; } = Array.Empty<double>();
+            public double[] GateM1 { get; init; } = Array.Empty<double>();
+            public double[] GateM2 { get; init; } = Array.Empty<double>();
+            public double[] GateM3 { get; init; } = Array.Empty<double>();
+            public double[] GateVarM1 { get; init; } = Array.Empty<double>();
+            public double[] GateVarM2 { get; init; } = Array.Empty<double>();
+            public double[] GateVarM3 { get; init; } = Array.Empty<double>();
+            public double[] GateCovM1M2 { get; init; } = Array.Empty<double>();
+            public double[] GateCovM1M3 { get; init; } = Array.Empty<double>();
+            public double[] GateCovM2M3 { get; init; } = Array.Empty<double>();
+        }
 
         private const int DetectorCount = 15;
 
@@ -79,6 +122,32 @@ namespace Listen_N
         private readonly double _wMax;  // max window size (s)
         private int _zMin = 3;          // minimum significance threshold
         private int _minGateCountForZ;  // minimum gate count to include in max |Z|
+        private int _minGateIndexForZ = 2;
+        private int _gateConfirmSteps = 2;
+        private int _fsmConfirmSteps = 2;
+        private int _warmupMinGateCount = 2;
+        private bool _warmupRequireWindowFilled = true;
+        private bool _warmupRequirePositiveM1 = true;
+        private double _covarianceRegularizationEpsilon = 1e-3;
+        private double _holdQuietStepFactor = 5.0;
+        private double _holdQuietTauFactor = 4.0;
+        private double _tauLowerBoundFactor = 3.0;
+        private double _lowRateWindowGrowthFactor = 1.2;
+        private double _relUncShrinkFactor = 0.5;
+        private double _relUncExpandFactor = 2.0;
+        private double _precheckShrinkMultiplier = 0.9;
+        private double _precheckExpandMultiplier = 1.2;
+        private double _thresholdExpandMultiplier = 1.3;
+        private double _thresholdShrinkMultiplier = 0.95;
+        private double _rateLimitDefaultDown = 0.5;
+        private double _rateLimitDefaultUp = 2.0;
+        private double _rateLimitExpandDown = 0.8;
+        private double _rateLimitExpandUp = 2.0;
+        private double _rateLimitContractDown = 0.5;
+        private double _rateLimitContractUp = 1.2;
+        private double _betaTrack = 0.5;
+        private double _betaOther = 0.1;
+        private double _windowFloor = 0.5;
 
         public int Zmin
         {
@@ -170,13 +239,15 @@ namespace Listen_N
         private double _zTrack = 3.0;
         private double _zHold = 6.0;
         private double _zPoisson = 4.0;
-        private readonly int _poissonQuietRequired = 1;
+        private int _poissonQuietRequired = 1;
         private int _poissonQuietStreak = 1;
 
         private int _mismatchStreak;
         private int _mismatchClearStreak;
         private readonly int _mismatchStreakRequired = 3;
         private readonly int _mismatchClearRequired = 6;
+        private int _lowRateGateIndex;
+        private int _degradedGateIndex;
 
         private double _tauHat = double.NaN;
         private double[] _corrResiduals = Array.Empty<double>();
@@ -191,9 +262,28 @@ namespace Listen_N
 
         // Page–Hinkley change-point detection variables
         private double _cpMean, _cpCum;
-        private readonly double _cpDelta = 5e-3, _cpLambda = 50.0;
+        private double _cpDeltaSingles = 5e-3, _cpLambdaSingles = 50.0;
         private bool _phAlarm;
         private double _cpZyMean, _cpZyCum;
+        private double _cpDeltaCorr = 5e-3, _cpLambdaCorr = 50.0;
+
+        public AdaptiveWindowEngine(RtReplayConfig config, bool startWorker = false, bool enableFileLog = false, string? logPath = null)
+            : this(
+                baseDeltaUs: (int)Math.Round(config.BinWidthS * 1e6),
+                windowStartSec: config.WindowStartS,
+                windowMinSec: config.WindowMinS,
+                windowMaxSec: config.WindowMaxS,
+                gateLadderUs: config.GateLadderS.Select(s => (int)Math.Round(s * 1e6)).ToArray(),
+                zMin: (int)Math.Round(config.MinSignificance),
+                epsY: config.WindowAdaptation.TargetRelY,
+                epsM1: config.WindowAdaptation.TargetRelM1,
+                startWorker: startWorker,
+                minGateCountForZ: config.GateStability.MinGateCountForZ,
+                enableFileLog: enableFileLog,
+                logPath: logPath)
+        {
+            ApplyReplayConfig(config);
+        }
 
         public AdaptiveWindowEngine(
            int baseDeltaUs = 50,
@@ -214,6 +304,7 @@ namespace Listen_N
             _tgIdx = DefaultGateIndex();
             _wMin = windowMinSec;
             _wMax = windowMaxSec;
+            _windowFloor = _wMin;
             _initialWindowSec = windowStartSec;
             _W = _initialWindowSec;
             _beta = BetaForState(_fsm);
@@ -224,6 +315,11 @@ namespace Listen_N
             _epsM1 = epsM1;
             _startWorker = startWorker;
             _minGateCountForZ = Math.Max(0, minGateCountForZ);
+            _minGateIndexForZ = Math.Max(0, _minGateIndexForZ);
+            _gateConfirmSteps = Math.Max(1, _gateConfirmSteps);
+            _fsmConfirmSteps = Math.Max(1, _fsmConfirmSteps);
+            _lowRateGateIndex = Math.Clamp(_lowRateGateIndex, 0, Math.Max(0, _tgUs.Length - 1));
+            _degradedGateIndex = Math.Clamp(_degradedGateIndex, 0, Math.Max(0, _tgUs.Length - 1));
 
             _deltaUs = Math.Max(baseDeltaUs, Math.Max(10, GateWidthUs(0) / 10));
             _startWorker = startWorker;
@@ -247,6 +343,49 @@ namespace Listen_N
         private readonly bool _enableFileLog;
         private readonly string? _logPath;
         private static readonly object _logLock = new();
+
+        private void ApplyReplayConfig(RtReplayConfig config)
+        {
+            _zMin = (int)Math.Round(config.MinSignificance);
+            _zTrack = Math.Max(0, config.Thresholds.ZTrack);
+            _zHold = Math.Max(_zTrack, config.Thresholds.ZHold);
+            _zPoisson = Math.Max(0, config.Thresholds.ZPoisson);
+            _poissonQuietRequired = Math.Max(1, config.Thresholds.PoissonQuietRequired);
+            _minGateIndexForZ = Math.Max(0, config.GateStability.MinGateIndexForZ);
+            _minGateCountForZ = Math.Max(0, config.GateStability.MinGateCountForZ);
+            _etaFrac = Math.Max(0, config.Plateau.EtaFraction);
+            _gateConfirmSteps = Math.Max(1, config.GateChangeConfirmSteps);
+            _fsmConfirmSteps = Math.Max(1, config.FsmConfirmationSteps);
+            _warmupMinGateCount = Math.Max(1, config.Warmup.MinGateCount);
+            _warmupRequireWindowFilled = config.Warmup.RequireWindowFilled;
+            _warmupRequirePositiveM1 = config.Warmup.RequirePositiveM1;
+            _covarianceRegularizationEpsilon = Math.Max(1e-12, config.CovarianceRegularizationEpsilon);
+            _holdQuietStepFactor = Math.Max(1e-6, config.QuietHorizon.StepMultiplier);
+            _holdQuietTauFactor = Math.Max(1e-6, config.QuietHorizon.TauMultiplier);
+            _tauLowerBoundFactor = Math.Max(1e-6, config.WindowAdaptation.KTau);
+            _windowFloor = Math.Max(_wMin, config.WindowAdaptation.WFloorS);
+            _lowRateWindowGrowthFactor = Math.Max(1.0, config.Thresholds.LowRateWindowGrowthFactor);
+
+            _relUncShrinkFactor = Math.Max(1e-6, config.WindowAdaptation.RelUncertaintyShrinkFactor);
+            _relUncExpandFactor = Math.Max(1e-6, config.WindowAdaptation.RelUncertaintyExpandFactor);
+            _precheckShrinkMultiplier = Math.Max(1e-6, config.WindowAdaptation.PrecheckShrinkMultiplier);
+            _precheckExpandMultiplier = Math.Max(1e-6, config.WindowAdaptation.PrecheckExpandMultiplier);
+            _thresholdExpandFactor = Math.Max(1e-6, config.WindowAdaptation.ThresholdExpandMultiplier);
+            _thresholdShrinkFactor = Math.Max(1e-6, config.WindowAdaptation.ThresholdShrinkMultiplier);
+            _rateLimitDefaultDown = Math.Max(1e-6, config.WindowAdaptation.RateLimitDefaultDown);
+            _rateLimitDefaultUp = Math.Max(1e-6, config.WindowAdaptation.RateLimitDefaultUp);
+            _rateLimitExpandDown = Math.Max(1e-6, config.WindowAdaptation.RateLimitExpandDown);
+            _rateLimitExpandUp = Math.Max(1e-6, config.WindowAdaptation.RateLimitExpandUp);
+            _rateLimitContractDown = Math.Max(1e-6, config.WindowAdaptation.RateLimitContractDown);
+            _rateLimitContractUp = Math.Max(1e-6, config.WindowAdaptation.RateLimitContractUp);
+
+            _lowRateGateIndex = Math.Clamp(config.Thresholds.LowRateGateIndex, 0, Math.Max(0, _tgUs.Length - 1));
+            _degradedGateIndex = Math.Clamp(config.Thresholds.DegradedGateIndex, 0, Math.Max(0, _tgUs.Length - 1));
+            _cpDeltaSingles = config.PageHinkley.Singles.Delta;
+            _cpLambdaSingles = config.PageHinkley.Singles.Lambda;
+            _cpDeltaCorr = config.PageHinkley.CorrZ.Delta;
+            _cpLambdaCorr = config.PageHinkley.CorrZ.Lambda;
+        }
 
         // Add a small helper (class scope)
         private static void AppendLineShared(string path, string line)
@@ -395,6 +534,18 @@ namespace Listen_N
     }
 }
 
+        public void RunDeterministicStep(long nowUs, double stepPeriodSec)
+        {
+            if (stepPeriodSec <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(stepPeriodSec), \"stepPeriodSec must be > 0.\");
+            }
+
+            DrainInbound();
+            RunAnalysis(nowUs);
+            _nextStepUs = nowUs + (long)(stepPeriodSec * 1e6);
+        }
+
 
         // Compute adaptive step size for sliding window
         private double StepSizeSec()
@@ -431,6 +582,17 @@ namespace Listen_N
 
             double[] Yk = new double[_tgUs.Length];
             double[] sigYk = new double[_tgUs.Length];
+            double[] m1k = new double[_tgUs.Length];
+            double[] m2k = new double[_tgUs.Length];
+            double[] m3k = new double[_tgUs.Length];
+            double[] v11k = new double[_tgUs.Length];
+            double[] v22k = new double[_tgUs.Length];
+            double[] v33k = new double[_tgUs.Length];
+            double[] v12k = new double[_tgUs.Length];
+            double[] v13k = new double[_tgUs.Length];
+            double[] v23k = new double[_tgUs.Length];
+            bool[] gateValid = new bool[_tgUs.Length];
+            bool[] gateSignificant = new bool[_tgUs.Length];
             double maxAbsZ = 0;
 
             // covariance entries for selected gate
@@ -470,8 +632,9 @@ namespace Listen_N
 
                 sigYk[k] = sigY;
                 bool validGate = sigY > 0 && double.IsFinite(sigY) && double.IsFinite(y);
+                gateValid[k] = validGate;
                 // Exclude the two smallest gates where Poisson variance dominates and Z is unstable
-                bool includeInZ = validGate && k >= 2 && N >= _minGateCountForZ;
+                bool includeInZ = validGate && k >= _minGateIndexForZ && N >= _minGateCountForZ;
                 if (includeInZ)
                 {
                     double z = Math.Abs(y / sigY);
@@ -482,6 +645,16 @@ namespace Listen_N
                     anyValidY = true;
                     allNonPositiveY &= y <= 0;
                 }
+
+                m1k[k] = m1;
+                m2k[k] = m2;
+                m3k[k] = m3;
+                v11k[k] = cov.V11;
+                v22k[k] = cov.V22;
+                v33k[k] = cov.V33;
+                v12k[k] = cov.V12;
+                v13k[k] = cov.V13;
+                v23k[k] = cov.V23;
 
                 if (k == _tgIdx)
                 {
@@ -501,6 +674,7 @@ namespace Listen_N
                 }
 
                 bool hasSig = sigY > 0 && double.IsFinite(sigY) && y > 0 && (y / sigY) >= _zMin;
+                gateSignificant[k] = hasSig;
                 if (hasSig && significantIdx < 0) significantIdx = k;
 
                 if (hasSig && k > significantIdx)
@@ -641,6 +815,49 @@ namespace Listen_N
                 AppendLineShared(_logPath, json);
             }
 
+            var replayStep = new ReplayStep
+            {
+                NowUs = nowUs,
+                WindowSec = _W,
+                SelectedGateUs = GateWidthUs(_tgIdx),
+                SelectedGateIndex = _tgIdx,
+                SignificantGateIndex = significantIdx,
+                PlateauGateIndex = plateauIdx,
+                PendingGateIndex = _pendingTgIdx,
+                GateConfirmations = _tgConfirmations,
+                GateConfirmRequired = _gateConfirmSteps,
+                GateFrozenInHold = _fsm == FSM.Hold,
+                State = _fsm.ToString(),
+                HoldFlag = _fsm == FSM.Hold,
+                SinglesChange = singlesChange,
+                CorrelationChange = correlationChange,
+                PageHinkleyAlarm = _phAlarm,
+                PageHinkleyMean = _cpMean,
+                PageHinkleyCum = _cpCum,
+                PageHinkleyZyMean = _cpZyMean,
+                PageHinkleyZyCum = _cpZyCum,
+                TauHatSec = _tauHat,
+                CorrFitRms = rms,
+                CorrResiduals = _corrResiduals ?? Array.Empty<double>(),
+                ModelMismatch = _modelMismatch,
+                InsufficientStatistics = _insufficientStatistics,
+                IllConditionedCovariance = illConditioned,
+                GateValid = gateValid,
+                GateSignificant = gateSignificant,
+                GateY = Yk,
+                GateSigmaY = sigYk,
+                GateM1 = m1k,
+                GateM2 = m2k,
+                GateM3 = m3k,
+                GateVarM1 = v11k,
+                GateVarM2 = v22k,
+                GateVarM3 = v33k,
+                GateCovM1M2 = v12k,
+                GateCovM1M3 = v13k,
+                GateCovM2M3 = v23k
+            };
+
+            OnReplayStep?.Invoke(replayStep);
             OnWindowSummary?.Invoke(summary);
             OnEstimate?.Invoke(est);
         }
@@ -681,7 +898,7 @@ namespace Listen_N
                 _tgConfirmations = 0;
                 return;
             }
-            if (_tgConfirmations >= 2)
+            if (_tgConfirmations >= _gateConfirmSteps)
             {
                 // Only adopt plateau index if sigYk is finite
                 // (use the selected gate's selSigY logic)
@@ -697,37 +914,39 @@ namespace Listen_N
             }
         }
 
-        private double TauLowerBound() => (double.IsFinite(_tauHat) && _tauHat > 0) ? Math.Max(_wMin, 3.0 * _tauHat) : _wMin;
+        private double TauLowerBound() => (double.IsFinite(_tauHat) && _tauHat > 0)
+            ? Math.Max(_windowFloor, _tauLowerBoundFactor * _tauHat)
+            : _windowFloor;
 
         private void AdaptWindow(double Y, double sigY, double m1, double varM1, bool honorTauFloor, double rDown = 0.5, double rUp = 2.0)
         {
             double relY = (Y > 0 && sigY > 0) ? sigY / Math.Max(Y, 1e-12) : double.PositiveInfinity;
             double relM1 = (m1 > 0 && varM1 >= 0) ? Math.Sqrt(varM1) / Math.Max(m1, 1e-12) : double.PositiveInfinity;
 
-            if (relY < 0.5 * _epsY && relM1 < 0.5 * _epsM1)
+            if (relY < _relUncShrinkFactor * _epsY && relM1 < _relUncShrinkFactor * _epsM1)
             {
-                _W = Math.Max(_W * 0.9, TauLowerBound());
+                _W = Math.Max(_W * _precheckShrinkMultiplier, TauLowerBound());
             }
-            else if (relY > 2 * _epsY || relM1 > 2 * _epsM1)
+            else if (relY > _relUncExpandFactor * _epsY || relM1 > _relUncExpandFactor * _epsM1)
             {
-                _W = Math.Min(_W * 1.2, _wMax);
+                _W = Math.Min(_W * _precheckExpandMultiplier, _wMax);
             }
 
             // dissertation-required threshold triggers
             if (relY > _epsY || relM1 > _epsM1)
             {
-                _W = Math.Min(_W * 1.3, _wMax);
+                _W = Math.Min(_W * _thresholdExpandFactor, _wMax);
             }
             else if (relY < _epsY && relM1 < _epsM1)
             {
-                _W = Math.Max(_W * 0.95, TauLowerBound());
+                _W = Math.Max(_W * _thresholdShrinkFactor, TauLowerBound());
             }
 
             double scale = Math.Max(Sq(relY / _epsY), Sq(relM1 / _epsM1));
             if (double.IsFinite(scale) && scale > 0)
             {
                 double req = Math.Clamp(_W * scale, _W * rDown, _W * rUp);
-                double lower = honorTauFloor ? TauLowerBound() : _wMin;
+                double lower = honorTauFloor ? TauLowerBound() : _windowFloor;
                 _W = Math.Clamp(req, lower, _wMax);
                 _statsBound = _W >= _wMax && scale > 1.0;
             }
@@ -763,8 +982,9 @@ namespace Listen_N
                     }
                     _beta = BetaForState(_fsm);
                     bool windowFilled = (nowUs - _acc.LeftEdgeUs) >= (long)(_W * 1e6);
-                    bool enoughGates = gatesUsed >= 2;
-                    bool positiveM1 = m1 > 0;
+                    bool windowReady = !_warmupRequireWindowFilled || windowFilled;
+                    bool enoughGates = gatesUsed >= _warmupMinGateCount;
+                    bool positiveM1 = !_warmupRequirePositiveM1 || m1 > 0;
                     if (maxAbsZ >= _zHold)
                     {
                         _poissonQuietStreak = 0;
@@ -779,13 +999,13 @@ namespace Listen_N
                         break;
                     }
 
-                    if (windowFilled && enoughGates && positiveM1 && maxAbsZ < _zPoisson)
+                    if (windowReady && enoughGates && positiveM1 && maxAbsZ < _zPoisson)
                     {
                         if (Math.Abs(zy) < _zPoisson) _poissonQuietStreak++;
                         else _poissonQuietStreak = 0;
                         if (_poissonQuietStreak >= _poissonQuietRequired) RequestFsmState(FSM.Poisson, nowUs);
                     }
-                    else if (windowFilled)
+                    else if (windowReady)
                     {
                         _poissonQuietStreak = 0;
                     }
@@ -859,7 +1079,7 @@ namespace Listen_N
                     }
                     else
                     {
-                        AdaptWindow(Y, sigY, m1, varM1, false);
+                        AdaptWindow(Y, sigY, m1, varM1, false, _rateLimitDefaultDown, _rateLimitDefaultUp);
                     }
 
                     if (maxAbsZ < _zPoisson)
@@ -876,27 +1096,27 @@ namespace Listen_N
 
                 case FSM.Expand:
                     _beta = BetaForState(_fsm);
-                    AdaptWindow(Y, sigY, m1, varM1, false, 0.8, 2.0);
+                    AdaptWindow(Y, sigY, m1, varM1, false, _rateLimitExpandDown, _rateLimitExpandUp);
                     if (relMax <= 1.0 || _W >= _wMax) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Contract:
                     _beta = BetaForState(_fsm);
-                    AdaptWindow(Y, sigY, m1, varM1, true, 0.5, 1.2);
+                    AdaptWindow(Y, sigY, m1, varM1, true, _rateLimitContractDown, _rateLimitContractUp);
                     if (relMax >= 0.8 || _W <= TauLowerBound()) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.Hold:
-                    _beta = 0.1;
+                    _beta = _betaOther;
                     // freeze window: do not call AdaptWindow in Hold
                     _W = Math.Max(_W, TauLowerBound());
                     if (!needHold && nowUs >= _holdQuietUntilUs) RequestFsmState(FSM.Track, nowUs);
                     break;
 
                 case FSM.LowRate:
-                    _beta = 0.1;
-                    _tgIdx = 0;
-                    _W = Math.Min(_W * 1.2, _wMax);
+                    _beta = _betaOther;
+                    _tgIdx = _lowRateGateIndex;
+                    _W = Math.Min(_W * _lowRateWindowGrowthFactor, _wMax);
                     if (hasSignificance) RequestFsmState(FSM.Track, nowUs);
                     break;
 
@@ -906,9 +1126,9 @@ namespace Listen_N
                         // Keep Degraded stable but clear the alarm so it doesn't cascade.
                         _phAlarm = false;
                     }
-                    _beta = 0.1;
-                    _tgIdx = 0;
-                    _W = Math.Min(_W * 1.2, _wMax);
+                    _beta = _betaOther;
+                    _tgIdx = _degradedGateIndex;
+                    _W = Math.Min(_W * _lowRateWindowGrowthFactor, _wMax);
                     if (_mismatchClearStreak >= _mismatchClearRequired)
                     {
                         RequestFsmState(FSM.Track, nowUs);
@@ -934,7 +1154,7 @@ namespace Listen_N
             }
 
             _fsmConfirmations++;
-            if (_fsmConfirmations >= 2)
+            if (_fsmConfirmations >= _fsmConfirmSteps)
             {
                 EnterState(target, nowUs);
             }
@@ -959,20 +1179,20 @@ namespace Listen_N
                     // (do not allow UpdateGateSelection to change _tgIdx while in Hold)
                     double tauFloor = TauLowerBound();
                     _W = Math.Max(_W, tauFloor);
-                    _beta = 0.1;
+                    _beta = _betaOther;
                     _S = _beta * _W;
-                    double horizon = Math.Max(5 * _S, 4 * TauLowerBound());
+                    double horizon = Math.Max(_holdQuietStepFactor * _S, _holdQuietTauFactor * TauLowerBound());
                     _holdQuietUntilUs = nowUs + (long)(horizon * 1e6);
                     break;
                 case FSM.LowRate:
-                    _tgIdx = 0;
-                    _W = Math.Max(_W, _wMin);
-                    _beta = 0.1;
+                    _tgIdx = _lowRateGateIndex;
+                    _W = Math.Max(_W, _windowFloor);
+                    _beta = _betaOther;
                     break;
                 case FSM.Degraded:
-                    _tgIdx = 0;
-                    _W = Math.Max(_W, _wMin);
-                    _beta = 0.1;
+                    _tgIdx = _degradedGateIndex;
+                    _W = Math.Max(_W, _windowFloor);
+                    _beta = _betaOther;
                     break;
                 default:
                     _holdQuietUntilUs = 0;
@@ -1005,9 +1225,9 @@ namespace Listen_N
         private bool RateChange(double x)
         {
             _cpMean = 0.99 * _cpMean + 0.01 * x;
-            _cpCum += x - _cpMean - _cpDelta;
+            _cpCum += x - _cpMean - _cpDeltaSingles;
             if (_cpCum < 0) _cpCum = 0;
-            bool alarm = _cpCum > _cpLambda;
+            bool alarm = _cpCum > _cpLambdaSingles;
             if (alarm) _phAlarm = true;
             return alarm;
         }
@@ -1015,14 +1235,14 @@ namespace Listen_N
         private bool RateChangeZy(double zy)
         {
             _cpZyMean = 0.99 * _cpZyMean + 0.01 * zy;
-            _cpZyCum += zy - _cpZyMean - _cpDelta;
+            _cpZyCum += zy - _cpZyMean - _cpDeltaCorr;
             if (_cpZyCum < 0) _cpZyCum = 0;
-            bool alarm = _cpZyCum > _cpLambda;
+            bool alarm = _cpZyCum > _cpLambdaCorr;
             if (alarm) _phAlarm = true;
             return alarm;
         }
 
-        private double BetaForState(FSM s) => s == FSM.Track ? 0.5 : 0.1;
+        private double BetaForState(FSM s) => s == FSM.Track ? _betaTrack : _betaOther;
 
         private bool RegularizeCov(in MomentCovariance cov, out MomentCovariance reg)
         {
@@ -1033,7 +1253,7 @@ namespace Listen_N
                 return false;
             }
 
-            double lambda = 1e-3 * Math.Max(1.0, maxDiag);
+            double lambda = _covarianceRegularizationEpsilon * Math.Max(1.0, maxDiag);
             double v11 = cov.V11 + lambda;
             double v22 = cov.V22 + lambda;
             double v33 = cov.V33 + lambda;
