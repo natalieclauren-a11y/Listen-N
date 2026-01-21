@@ -112,8 +112,201 @@ internal static class Program
             .ToArray();
     }
 
+    internal static int RunExportBundle(string[] args)
+    {
+        try
+        {
+            string? outputDir = null;
+            string? singleDir = null;
+            string? dualDir = null;
+            string? classifierPath = null;
+            string? configPath = null;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i];
+                string NextValue()
+                {
+                    if (i + 1 >= args.Length)
+                    {
+                        throw new ArgumentException($"Missing value for {arg}.");
+                    }
+
+                    return args[++i];
+                }
+
+                if (arg.Equals("--out", StringComparison.OrdinalIgnoreCase))
+                {
+                    outputDir = NextValue();
+                }
+                else if (arg.StartsWith("--out=", StringComparison.OrdinalIgnoreCase))
+                {
+                    outputDir = arg.Substring("--out=".Length);
+                }
+                else if (arg.Equals("--single", StringComparison.OrdinalIgnoreCase))
+                {
+                    singleDir = NextValue();
+                }
+                else if (arg.StartsWith("--single=", StringComparison.OrdinalIgnoreCase))
+                {
+                    singleDir = arg.Substring("--single=".Length);
+                }
+                else if (arg.Equals("--dual", StringComparison.OrdinalIgnoreCase))
+                {
+                    dualDir = NextValue();
+                }
+                else if (arg.StartsWith("--dual=", StringComparison.OrdinalIgnoreCase))
+                {
+                    dualDir = arg.Substring("--dual=".Length);
+                }
+                else if (arg.Equals("--classifier", StringComparison.OrdinalIgnoreCase))
+                {
+                    classifierPath = NextValue();
+                }
+                else if (arg.StartsWith("--classifier=", StringComparison.OrdinalIgnoreCase))
+                {
+                    classifierPath = arg.Substring("--classifier=".Length);
+                }
+                else if (arg.Equals("--config", StringComparison.OrdinalIgnoreCase))
+                {
+                    configPath = NextValue();
+                }
+                else if (arg.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))
+                {
+                    configPath = arg.Substring("--config=".Length);
+                }
+                else
+                {
+                    throw new ArgumentException($"Unknown export-bundle argument: {arg}");
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(outputDir))
+            {
+                throw new ArgumentException("export-bundle requires --out <dir>.");
+            }
+
+            string baseDir = Directory.GetCurrentDirectory();
+            if (!string.IsNullOrWhiteSpace(configPath))
+            {
+                string configFullPath = Path.GetFullPath(configPath);
+                baseDir = Path.GetDirectoryName(configFullPath) ?? baseDir;
+            }
+
+            configPath ??= Path.Combine(baseDir, "pipeline_config.json");
+            classifierPath ??= Path.Combine(baseDir, "classifier.zip");
+            singleDir ??= Path.Combine(baseDir, "single_regressor");
+            dualDir ??= Path.Combine(baseDir, "dual_regressor");
+
+            if (!File.Exists(classifierPath))
+            {
+                throw new FileNotFoundException($"Classifier model not found at {classifierPath}.");
+            }
+
+            if (!Directory.Exists(singleDir))
+            {
+                throw new DirectoryNotFoundException($"Single regressor directory not found at {singleDir}.");
+            }
+
+            if (!Directory.Exists(dualDir))
+            {
+                throw new DirectoryNotFoundException($"Dual regressor directory not found at {dualDir}.");
+            }
+
+            PipelineConfiguration config = File.Exists(configPath)
+                ? JsonSerializer.Deserialize<PipelineConfiguration>(File.ReadAllText(configPath))
+                  ?? throw new InvalidOperationException($"Failed to deserialize pipeline configuration at {configPath}.")
+                : new PipelineConfiguration
+                {
+                    Epsilon = 1e-9,
+                    OutOfDistributionThreshold = 0,
+                    ClassifierThreshold = 0.5,
+                    MinimumSeparationCm = 0,
+                    StrictProbability = 0.5
+                };
+
+            var featureBuilder = config.DipolePositions.Count == FeatureBuilder.ChannelCount
+                ? new FeatureBuilder(config.Epsilon, config.DipolePositions)
+                : new FeatureBuilder(config.Epsilon);
+
+            config.FeatureNames = featureBuilder.FeatureNames;
+            config.FeatureColumns = featureBuilder.FeatureNames;
+            config.DipolePositions = featureBuilder.DipolePositions;
+            config.SchemaVersion = string.IsNullOrWhiteSpace(config.SchemaVersion)
+                ? SchemaStampBuilder.DefaultSchemaVersion
+                : config.SchemaVersion;
+
+            string classifierTrainer = string.IsNullOrWhiteSpace(config.ClassifierTrainer)
+                ? "ImportedClassifier"
+                : config.ClassifierTrainer!;
+            IReadOnlyList<string> regressorTrainers = config.RegressorTrainers?.ToArray() ?? new[] { "ImportedRegression", "ImportedRegression" };
+            if (regressorTrainers.Count == 0)
+            {
+                regressorTrainers = new[] { "ImportedRegression", "ImportedRegression" };
+            }
+
+            config.ClassifierTrainer = classifierTrainer;
+            config.RegressorTrainers = regressorTrainers;
+
+            var schemaStamp = SchemaStampBuilder.Build(config, featureBuilder, classifierTrainer, regressorTrainers);
+            config.SchemaHash = SchemaStampBuilder.ComputeHash(schemaStamp);
+
+            var mlContext = new MLContext(seed: 42);
+
+            ITransformer classifier;
+            using (var classifierStream = File.OpenRead(classifierPath))
+            {
+                classifier = mlContext.Model.Load(classifierStream, out _);
+            }
+
+            var singleRegressor = RegressionModelGroup.Load(mlContext, singleDir);
+            var dualRegressor = RegressionModelGroup.Load(mlContext, dualDir);
+            var mahalanobis = new MahalanobisScorer(new double[4] { 0, 0, 0, 0 }, Matrix4x4.Identity);
+
+            var pipeline = new LocalizationPipeline(mlContext, featureBuilder, classifier, singleRegressor, dualRegressor, mahalanobis, config);
+            pipeline.Save(outputDir);
+
+            var identity = new PipelineIdentity
+            {
+                SchemaHash = config.SchemaHash,
+                FeatureHash = config.SchemaHash,
+                TrainingDurationSec = 30,
+                TrainingDatasetFingerprint = "export-bundle",
+                BuildTimestampUtc = DateTime.UtcNow.ToString("O")
+            };
+
+            var identityJson = JsonSerializer.Serialize(identity, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(Path.Combine(outputDir, "pipeline_identity.json"), identityJson);
+
+            string configOut = Path.Combine(outputDir, "pipeline_config.json");
+            string classifierOut = Path.Combine(outputDir, "classifier.zip");
+            string singleOut = Path.Combine(outputDir, "single_regressor");
+            string dualOut = Path.Combine(outputDir, "dual_regressor");
+            if (!File.Exists(configOut) || !File.Exists(classifierOut) || !Directory.Exists(singleOut) || !Directory.Exists(dualOut))
+            {
+                throw new InvalidOperationException("Exported bundle is missing required artifacts.");
+            }
+
+            string modelId = PipelineIdentity.ComputeModelId(identity);
+            Console.WriteLine($"Exported bundle to {Path.GetFullPath(outputDir)}");
+            Console.WriteLine($"ModelId={modelId}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"export-bundle failed: {ex.Message}");
+            return 1;
+        }
+    }
+
     public static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0].Equals("export-bundle", StringComparison.OrdinalIgnoreCase))
+        {
+            int exitCode = RunExportBundle(args.Skip(1).ToArray());
+            Environment.Exit(exitCode);
+        }
+
         var (dataDir, outputDir, durationOverride, useGroupedSplit, validateOod, oodFaultFraction, oodSeed, runNegativeControls, negativeControlSeed, runPermutationControl, runLabelShuffleControl, emitFeatureSchemaTex, texOutPath, texCaption, texLabel, emitLockedSchemaTex, lockedTexOutPath, lockedTexCaption, lockedTexLabel, emitNormalizationFigure, normFigOutPath, normFigRegime, normFigRoundCm, normFigMinCountRatio, normFigMaxExamples, normFigTitle, emitDescriptorFigure, descFigOutPath, descFigBins, descFigRegime, descFigTitle, emitOodFigure, oodFigOutPath, oodFigTitle, oodFigBins, oodFigMaxPoints, oodFigThresholdMode, oodFigThresholdK, oodFigRegime, emitClassifierFigure, clfFigOutPath, clfFigTitle, clfFigMaxPoints, clfFigThreshold, clfFigRegime, emitReliabilityFigure, reliabilityFigOutPath, reliabilityBinCount, emitSingleErrorFigure, singleErrFigOut, singleErrFigTitle, singleErrFigRegime, singleErrMaxPoints, emitDualErrorFigure, dualErrFigOut, dualErrFigTitle, dualErrFigRegime, dualErrErrorMetric, dualErrMaxPoints, emitOutcomeFigure, outcomeFigOut, outcomeFigTitle, outcomeMinSeparationCm, outcomeRegime, outcomeOodPassOnly, emitDomainShiftOutcomeCoverageFigure, domainShiftOutcomeCoverageOut, domainShiftDataDir, domainShiftSingleFiles, domainShiftDualFiles, artifactsDir, computeTriggerThresholds, evalCsvPath, triggerJsonOut, errorTargetCm, triggerBins, triggerMinSamples, emitTriggerPolicy, triggerPolicyOut, triggerPolicyTargetM, triggerPolicyDurations, triggerPolicyBinWidth, triggerPolicyMinSamples, triggerPolicyLabelMode, triggerPolicyNotes) = ParseArgs(args);
         Directory.CreateDirectory(outputDir);
 
