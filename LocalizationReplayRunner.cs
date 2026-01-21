@@ -1,10 +1,12 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using Integrated.Contracts;
 using Integrated.Runtime;
@@ -16,7 +18,8 @@ namespace Listen_N
     {
         public required string InputPath { get; init; }
         public required string OutputDirectory { get; init; }
-        public string? PolicyPath { get; init; }
+        public string? ModelsDirectory { get; init; }
+        public string? ConfigPath { get; init; }
         public string? RunId { get; init; }
     }
 
@@ -30,21 +33,25 @@ namespace Listen_N
 
     public static class LocalizationReplayRunner
     {
-        private static readonly JsonSerializerOptions EventSerializerOptions = new()
-        {
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
-            WriteIndented = false
-        };
+        private const string EventSchemaVersion = "loc_events.v1";
+        private const string SummarySchemaVersion = "loc_replay_summary.v1";
 
         public static int RunCli(string[] args)
         {
             string? inputPath = null;
             string? outputDir = null;
-            string? policyPath = null;
+            string? modelsDirectory = null;
+            string? configPath = null;
             string? runId = null;
 
-            for (int i = 0; i < args.Length; i++)
+            int argIndex = 0;
+            if (args.Length > 0 && (string.Equals(args[0], "replay", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(args[0], "--replay", StringComparison.OrdinalIgnoreCase)))
+            {
+                argIndex = 1;
+            }
+
+            for (int i = argIndex; i < args.Length; i++)
             {
                 string arg = args[i];
                 switch (arg)
@@ -55,8 +62,11 @@ namespace Listen_N
                     case "--output" when i + 1 < args.Length:
                         outputDir = args[++i];
                         break;
-                    case "--policy" when i + 1 < args.Length:
-                        policyPath = args[++i];
+                    case "--models" when i + 1 < args.Length:
+                        modelsDirectory = args[++i];
+                        break;
+                    case "--config" when i + 1 < args.Length:
+                        configPath = args[++i];
                         break;
                     case "--run-id" when i + 1 < args.Length:
                         runId = args[++i];
@@ -68,9 +78,11 @@ namespace Listen_N
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(inputPath) || string.IsNullOrWhiteSpace(outputDir))
+            if (string.IsNullOrWhiteSpace(inputPath)
+                || string.IsNullOrWhiteSpace(outputDir)
+                || string.IsNullOrWhiteSpace(modelsDirectory))
             {
-                Console.Error.WriteLine("localize requires --input <rt_windows.ndjson> and --output <dir>.");
+                Console.Error.WriteLine("localize-replay requires --input <rt_windows.ndjson>, --output <dir>, and --models <dir>.");
                 PrintUsage();
                 return 1;
             }
@@ -79,7 +91,8 @@ namespace Listen_N
             {
                 InputPath = inputPath,
                 OutputDirectory = outputDir,
-                PolicyPath = policyPath,
+                ModelsDirectory = modelsDirectory,
+                ConfigPath = configPath,
                 RunId = runId
             };
 
@@ -95,7 +108,7 @@ namespace Listen_N
 
             if (string.IsNullOrWhiteSpace(options.InputPath))
             {
-                Console.Error.WriteLine("localize requires --input <rt_windows.ndjson>.");
+                Console.Error.WriteLine("localize-replay requires --input <rt_windows.ndjson>.");
                 return 1;
             }
 
@@ -107,7 +120,13 @@ namespace Listen_N
 
             if (string.IsNullOrWhiteSpace(options.OutputDirectory))
             {
-                Console.Error.WriteLine("localize requires --output <dir>.");
+                Console.Error.WriteLine("localize-replay requires --output <dir>.");
+                return 1;
+            }
+
+            if (string.IsNullOrWhiteSpace(options.ModelsDirectory) && dependencies is null)
+            {
+                Console.Error.WriteLine("localize-replay requires --models <dir>.");
                 return 1;
             }
 
@@ -131,15 +150,13 @@ namespace Listen_N
             LocalizationReplayDependencies resolvedDependencies;
             try
             {
-                resolvedDependencies = dependencies ?? LoadDependencies(options.PolicyPath);
+                resolvedDependencies = dependencies ?? LoadDependencies(options.ConfigPath, options.ModelsDirectory);
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Localization artifacts missing or invalid: {ex.Message}");
                 return 1;
             }
-
-            var triggerPolicy = new DefaultLocalizationTriggerPolicy();
             var policy = new LocalizationEpisodePolicy(resolvedDependencies.EpisodePolicyConfig, resolvedDependencies.Thresholds)
             {
                 AutoModeEnabled = true,
@@ -152,17 +169,25 @@ namespace Listen_N
                 resolvedDependencies.RuntimeConfig.DegradedQueueSaturationThreshold);
             var limiter = new LocalizationMlRequestLimiter(worker, policy, resolvedDependencies.RuntimeConfig, health);
 
-            object writeLock = new();
             int windowsProcessed = 0;
-            int episodesStarted = 0;
-            int episodesCompleted = 0;
-            int episodesRefused = 0;
+            int requestsIssued = 0;
+            int resultsPublished = 0;
+            int requestsRefused = 0;
             int pendingRequests = 0;
             bool workerFaulted = false;
             Exception? workerException = null;
             DateTimeOffset? currentWindowEndUtc = null;
+            string? currentRtState = null;
+            int currentWindowSeq = -1;
+            int eventIndex = 0;
+            int requestCounter = 0;
 
-            var lastRequestByEpisode = new Dictionary<Guid, RtLocalizationRequest>();
+            var lastRequestByEpisode = new Dictionary<Guid, RequestContext>();
+            var requestsBySequence = new Dictionary<long, RequestContext>();
+            var requestsById = new Dictionary<string, RequestContext>(StringComparer.Ordinal);
+            var pendingRequestIds = new HashSet<string>(StringComparer.Ordinal);
+            var workerResults = new Queue<WorkerResult>();
+            var workerSignal = new AutoResetEvent(false);
 
             string eventsPath = Path.Combine(options.OutputDirectory, "localization_events.ndjson");
             StreamWriter? writer = null;
@@ -183,19 +208,30 @@ namespace Listen_N
 
                 policy.OnRequestMl += request =>
                 {
+                    var context = BuildRequestContext(runId, request, currentWindowSeq, currentWindowEndUtc, currentRtState, requestCounter);
+                    requestCounter++;
+                    requestsIssued++;
+
                     lock (lastRequestByEpisode)
                     {
-                        lastRequestByEpisode[request.EpisodeId] = request;
+                        lastRequestByEpisode[request.EpisodeId] = context;
+                        requestsBySequence[request.Sequence] = context;
+                        requestsById[context.RequestId] = context;
+                        pendingRequestIds.Add(context.RequestId);
+                        pendingRequests = pendingRequestIds.Count;
                     }
 
-                    Interlocked.Increment(ref pendingRequests);
+                    WriteEvent(writer, ref eventIndex, BuildRequestEvent(runId, context, resolvedDependencies.EpisodePolicyConfig));
                     limiter.HandleRequest(request);
                 };
 
                 worker.OnResult += (request, prediction) =>
                 {
-                    policy.OnMlResult(request, prediction);
-                    Interlocked.Decrement(ref pendingRequests);
+                    lock (workerResults)
+                    {
+                        workerResults.Enqueue(new WorkerResult(request, prediction));
+                    }
+                    workerSignal.Set();
                 };
 
                 worker.OnWorkerFaulted += ex =>
@@ -208,51 +244,40 @@ namespace Listen_N
 
                 policy.OnDecisionRecord += record =>
                 {
-                    if (record.DecisionKind == LocalizationDecisionKind.EpisodeStart)
-                    {
-                        episodesStarted++;
-                        var evt = BuildEvent(
-                            "episode_started",
-                            runId,
-                            currentWindowEndUtc ?? DateTimeOffset.MinValue,
-                            currentWindowEndUtc ?? DateTimeOffset.MinValue,
-                            reason: null,
-                            requestedDurationSeconds: record.EpisodeContext.AccumulatedDurationSeconds,
-                            result: null,
-                            record);
-                        WriteEvent(writer, writeLock, evt);
-                        return;
-                    }
-
                     if (record.DecisionKind == LocalizationDecisionKind.Publish)
                     {
-                        episodesCompleted++;
-                        var evt = BuildEvent(
-                            "episode_completed",
-                            runId,
-                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                            reason: null,
-                            requestedDurationSeconds: null,
-                            result: record.Result.PublishedCoords,
-                            record);
-                        WriteEvent(writer, writeLock, evt);
+                        var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
+                        if (context is not null)
+                        {
+                            WriteEvent(writer, ref eventIndex, BuildResultEvent(runId, context, record));
+                            RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                            resultsPublished++;
+                        }
                         return;
                     }
 
                     if (record.DecisionKind == LocalizationDecisionKind.Refuse)
                     {
-                        episodesRefused++;
-                        var evt = BuildEvent(
-                            "episode_refused",
-                            runId,
-                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                            reason: record.ReasonCode.ToString(),
-                            requestedDurationSeconds: null,
-                            result: null,
-                            record);
-                        WriteEvent(writer, writeLock, evt);
+                        var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
+                        if (context is not null)
+                        {
+                            WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, record));
+                            RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                            requestsRefused++;
+                        }
+                        return;
+                    }
+
+                    if (record.DecisionKind == LocalizationDecisionKind.Defer
+                        && record.ReasonCode == LocalizationDecisionReasonCode.Deferred_Backpressure)
+                    {
+                        var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
+                        if (context is not null)
+                        {
+                            WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, record));
+                            RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                            requestsRefused++;
+                        }
                     }
                 };
 
@@ -267,22 +292,12 @@ namespace Listen_N
 
                         RtWindowSummary window = ParseWindowSummary(line);
                         windowsProcessed++;
+                        currentWindowSeq++;
                         currentWindowEndUtc = window.WindowEndUtc;
-
-                        var snapshot = BuildSnapshot(window, windowsProcessed);
-                        bool triggered = triggerPolicy.ShouldTrigger(snapshot);
-                        var triggerEvent = new LocalizationReplayEvent
-                        {
-                            EventTimeUtc = window.WindowEndUtc,
-                            EventType = "trigger_evaluated",
-                            RunId = runId,
-                            WindowEndUtc = window.WindowEndUtc,
-                            Triggered = triggered,
-                            RtState = window.RtState
-                        };
-                        WriteEvent(writer, writeLock, triggerEvent);
+                        currentRtState = window.RtState;
 
                         policy.AddWindow(window);
+                        DrainWorkerResults(policy, workerResults, pendingRequestIds, ref pendingRequests, requestsBySequence);
 
                         if (workerFaulted)
                         {
@@ -297,21 +312,36 @@ namespace Listen_N
                 }
                 finally
                 {
-                    WaitForPendingRequests(ref pendingRequests, workerFaulted);
+                    bool drained = WaitForPendingRequests(ref pendingRequests, workerFaulted, workerResults, workerSignal, policy, pendingRequestIds, requestsById, writer, ref eventIndex, runId, requestsBySequence, ref requestsRefused);
                     cts.Cancel();
                     AwaitWorker(workerTask);
+                    if (!drained)
+                    {
+                        Console.Error.WriteLine("Localization replay ended with undrained ML requests.");
+                        return 1;
+                    }
                 }
             }
 
-            Console.WriteLine($"windows_processed={windowsProcessed}, episodes_started={episodesStarted}, episodes_completed={episodesCompleted}, episodes_refused={episodesRefused}");
+            string summaryPath = Path.Combine(options.OutputDirectory, "localization_replay_summary.json");
+            string eventsHash = ComputeFileHash(eventsPath);
+            WriteSummary(summaryPath, runId, windowsProcessed, eventIndex, requestsIssued, requestsRefused, resultsPublished, pendingRequests, eventsHash);
+
+            Console.WriteLine($"windows_processed={windowsProcessed}, requests={requestsIssued}, refused={requestsRefused}, results={resultsPublished}");
             return workerFaulted ? 1 : 0;
         }
 
-        private static LocalizationReplayDependencies LoadDependencies(string? policyPath)
+        private static LocalizationReplayDependencies LoadDependencies(string? configPath, string? modelsDirectory)
         {
-            string baseDirectory = Directory.GetCurrentDirectory();
-            string runtimeConfigPath = Path.Combine(baseDirectory, "localization_runtime_config.json");
-            var runtimeConfig = LocalizationRuntimeConfig.Load(runtimeConfigPath);
+            string resolvedConfigPath = string.IsNullOrWhiteSpace(configPath)
+                ? Path.Combine(Directory.GetCurrentDirectory(), "localization_runtime_config.json")
+                : configPath;
+            string baseDirectory = Path.GetDirectoryName(resolvedConfigPath) ?? Directory.GetCurrentDirectory();
+            var runtimeConfig = LocalizationRuntimeConfig.Load(resolvedConfigPath);
+            if (!string.IsNullOrWhiteSpace(modelsDirectory))
+            {
+                runtimeConfig = runtimeConfig with { ArtifactsDirectory = modelsDirectory };
+            }
             var validation = runtimeConfig.Validate(baseDirectory);
             if (!validation.IsValid)
             {
@@ -323,19 +353,6 @@ namespace Listen_N
 
             TriggerPolicyThresholds thresholds = artifacts.Thresholds;
             LocalizationEpisodePolicyConfig config = artifacts.PolicyConfig;
-            if (!string.IsNullOrWhiteSpace(policyPath))
-            {
-                if (!File.Exists(policyPath))
-                {
-                    throw new InvalidOperationException($"Trigger policy not found at {policyPath}.");
-                }
-
-                var policyDocument = JsonSerializer.Deserialize<TriggerPolicyDocument>(
-                    File.ReadAllText(policyPath),
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                    ?? throw new InvalidOperationException("Trigger policy deserialized to null.");
-                (thresholds, config) = policyDocument.ToPolicyInputs();
-            }
 
             var worker = new LocalizationWorker(artifacts.Pipeline, runtimeConfig.MaxMlQueueDepth);
             return new LocalizationReplayDependencies
@@ -347,32 +364,476 @@ namespace Listen_N
             };
         }
 
-        private static AnalysisSnapshot BuildSnapshot(RtWindowSummary window, int index)
+        private static RequestContext BuildRequestContext(
+            string runId,
+            RtLocalizationRequest request,
+            int windowSeq,
+            DateTimeOffset? windowEndUtc,
+            string? rtState,
+            int requestCounter)
         {
-            var counts = new int[window.Counts15.Length];
-            for (int i = 0; i < window.Counts15.Length; i++)
+            var counts = new int[request.Row.Channels.Count];
+            double totalCounts = 0;
+            for (int i = 0; i < request.Row.Channels.Count; i++)
             {
-                counts[i] = (int)Math.Round(window.Counts15[i]);
+                var value = (int)Math.Round(request.Row.Channels[i]);
+                counts[i] = value;
+                totalCounts += value;
             }
 
-            int totalCounts = (int)Math.Round(window.Counts15.Sum());
-            return new AnalysisSnapshot(
-                BuildDeterministicGuid(index, window.WindowEndUtc),
-                window.WindowEndUtc.UtcDateTime,
-                window.DurationSeconds,
-                counts,
-                totalCounts,
-                window.RtState,
-                0,
-                0,
-                0,
-                window.QualityScalar,
-                false,
-                false,
-                false,
-                0,
-                string.Empty,
-                null);
+            DateTimeOffset resolvedWindowEndUtc = request.Row.WindowEndUtc ?? windowEndUtc ?? DateTimeOffset.MinValue;
+            string requestId = $"{runId}:{windowSeq}:{requestCounter}";
+            return new RequestContext
+            {
+                RequestId = requestId,
+                EpisodeId = request.EpisodeId,
+                WindowSeq = windowSeq,
+                WindowEndUtc = resolvedWindowEndUtc,
+                DurationSeconds = request.Row.DurationSeconds,
+                ChannelCounts = counts,
+                RtState = rtState ?? string.Empty,
+                IsManual = request.IsManual,
+                IsProbe = request.IsProbe,
+                Sequence = request.Sequence,
+                TotalCounts = totalCounts
+            };
+        }
+
+        private static RequestContext? ResolveRequestContext(Guid episodeId, Dictionary<Guid, RequestContext> lastRequestByEpisode)
+        {
+            lock (lastRequestByEpisode)
+            {
+                if (lastRequestByEpisode.TryGetValue(episodeId, out var context))
+                {
+                    return context;
+                }
+            }
+
+            return null;
+        }
+
+        private static RequestContext? ResolveRequestContextBySequence(long sequence, Dictionary<long, RequestContext> requestsBySequence)
+        {
+            lock (requestsBySequence)
+            {
+                if (requestsBySequence.TryGetValue(sequence, out var context))
+                {
+                    return context;
+                }
+            }
+
+            return null;
+        }
+
+        private static void RemovePendingRequest(RequestContext context, HashSet<string> pendingRequestIds, ref int pendingRequests)
+        {
+            if (pendingRequestIds.Remove(context.RequestId))
+            {
+                pendingRequests = pendingRequestIds.Count;
+            }
+        }
+
+        private static void DrainWorkerResults(
+            LocalizationEpisodePolicy policy,
+            Queue<WorkerResult> workerResults,
+            HashSet<string> pendingRequestIds,
+            ref int pendingRequests,
+            Dictionary<long, RequestContext> requestsBySequence)
+        {
+            while (true)
+            {
+                WorkerResult? result = null;
+                lock (workerResults)
+                {
+                    if (workerResults.Count > 0)
+                    {
+                        result = workerResults.Dequeue();
+                    }
+                }
+
+                if (result is null)
+                {
+                    break;
+                }
+
+                policy.OnMlResult(result.Request, result.Prediction);
+
+                var context = ResolveRequestContextBySequence(result.Request.Sequence, requestsBySequence);
+                if (context is not null)
+                {
+                    RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                }
+            }
+        }
+
+        private static bool WaitForPendingRequests(
+            ref int pendingRequests,
+            bool workerFaulted,
+            Queue<WorkerResult> workerResults,
+            AutoResetEvent workerSignal,
+            LocalizationEpisodePolicy policy,
+            HashSet<string> pendingRequestIds,
+            Dictionary<string, RequestContext> requestsById,
+            StreamWriter writer,
+            ref int eventIndex,
+            string runId,
+            Dictionary<long, RequestContext> requestsBySequence,
+            ref int requestsRefused)
+        {
+            if (workerFaulted)
+            {
+                var snapshot = pendingRequestIds.ToArray();
+                foreach (var requestId in snapshot)
+                {
+                    if (!requestsById.TryGetValue(requestId, out var context))
+                    {
+                        continue;
+                    }
+
+                    WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, new[] { "WORKER_FAULTED" }));
+                    RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                    requestsRefused++;
+                }
+                return false;
+            }
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            while (pendingRequests > 0)
+            {
+                DrainWorkerResults(policy, workerResults, pendingRequestIds, ref pendingRequests, requestsBySequence);
+                if (pendingRequests == 0)
+                {
+                    return true;
+                }
+
+                if (stopwatch.Elapsed > TimeSpan.FromSeconds(10))
+                {
+                    break;
+                }
+
+                workerSignal.WaitOne(TimeSpan.FromMilliseconds(50));
+            }
+
+            if (pendingRequests > 0)
+            {
+                var snapshot = pendingRequestIds.ToArray();
+                foreach (var requestId in snapshot)
+                {
+                    if (!requestsById.TryGetValue(requestId, out var context))
+                    {
+                        continue;
+                    }
+
+                    WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, new[] { "PENDING_REQUESTS_NOT_DRAINED" }));
+                    RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                    requestsRefused++;
+                }
+            }
+
+            return pendingRequests == 0;
+        }
+
+        private static LocalizationEvent BuildRequestEvent(string runId, RequestContext context, LocalizationEpisodePolicyConfig config)
+        {
+            return new LocalizationEvent
+            {
+                EventType = "localization_requested",
+                RunId = runId,
+                WindowEndUtc = context.WindowEndUtc,
+                WindowSeq = context.WindowSeq,
+                RequestId = context.RequestId,
+                DurationSeconds = context.DurationSeconds,
+                ChannelCounts = context.ChannelCounts,
+                RtState = context.RtState,
+                TriggerBasis = BuildTriggerBasis(context, config)
+            };
+        }
+
+        private static LocalizationEvent BuildRefusalEvent(string runId, RequestContext context, LocalizationDecisionRecord record)
+        {
+            return new LocalizationEvent
+            {
+                EventType = "localization_refused",
+                RunId = runId,
+                WindowEndUtc = context.WindowEndUtc,
+                WindowSeq = context.WindowSeq,
+                RequestId = context.RequestId,
+                DurationSeconds = context.DurationSeconds,
+                ChannelCounts = context.ChannelCounts,
+                RtState = context.RtState,
+                RefusalReasonCodes = MapRefusalReasonCodes(record)
+            };
+        }
+
+        private static LocalizationEvent BuildRefusalEvent(string runId, RequestContext context, IReadOnlyList<string> reasonCodes)
+        {
+            return new LocalizationEvent
+            {
+                EventType = "localization_refused",
+                RunId = runId,
+                WindowEndUtc = context.WindowEndUtc,
+                WindowSeq = context.WindowSeq,
+                RequestId = context.RequestId,
+                DurationSeconds = context.DurationSeconds,
+                ChannelCounts = context.ChannelCounts,
+                RtState = context.RtState,
+                RefusalReasonCodes = reasonCodes.ToArray()
+            };
+        }
+
+        private static LocalizationEvent BuildResultEvent(string runId, RequestContext context, LocalizationDecisionRecord record)
+        {
+            var coords = record.Result.PublishedCoords ?? Array.Empty<double>();
+            return new LocalizationEvent
+            {
+                EventType = "localization_result",
+                RunId = runId,
+                WindowEndUtc = context.WindowEndUtc,
+                WindowSeq = context.WindowSeq,
+                RequestId = context.RequestId,
+                Label = record.MlContext?.OutcomeLabel ?? "Unknown",
+                CoordsCm = coords,
+                Confidence = BuildConfidence(record),
+                Ood = BuildOod(record),
+                ModelId = record.MlContext?.ModelId
+            };
+        }
+
+        private static TriggerBasis BuildTriggerBasis(RequestContext context, LocalizationEpisodePolicyConfig config)
+        {
+            return new TriggerBasis
+            {
+                RequestKind = context.IsProbe ? "probe" : "final",
+                IsManual = context.IsManual,
+                AccumulatedDurationSeconds = context.DurationSeconds,
+                AccumulatedTotalCounts = context.TotalCounts,
+                CheckEveryCounts = config.CheckEveryCounts,
+                MinDurationSeconds = config.MinPublishDurationSeconds,
+                MaxDurationSeconds = config.MaxPublishDurationSeconds
+            };
+        }
+
+        private static LocalizationConfidence? BuildConfidence(LocalizationDecisionRecord record)
+        {
+            if (record.MlContext is null || !double.IsFinite(record.MlContext.ClassifierProbability))
+            {
+                return null;
+            }
+
+            return new LocalizationConfidence
+            {
+                ClassifierProbability = record.MlContext.ClassifierProbability,
+                InferenceTimeMs = record.MlContext.InferenceTimeMs
+            };
+        }
+
+        private static LocalizationOod? BuildOod(LocalizationDecisionRecord record)
+        {
+            if (record.MlContext is null || !double.IsFinite(record.MlContext.MahalanobisDistance))
+            {
+                return null;
+            }
+
+            return new LocalizationOod
+            {
+                IsOod = record.MlContext.IsOutOfDistribution,
+                Distance = record.MlContext.MahalanobisDistance
+            };
+        }
+
+        private static string[] MapRefusalReasonCodes(LocalizationDecisionRecord record)
+        {
+            return record.ReasonCode switch
+            {
+                LocalizationDecisionReasonCode.Refused_OOD => new[] { "OOD" },
+                LocalizationDecisionReasonCode.Refused_OODAtMaxDuration => new[] { "OOD_AT_MAX_DURATION" },
+                LocalizationDecisionReasonCode.Refused_InvalidPredictionShape => new[] { "INVALID_PREDICTION_SHAPE" },
+                LocalizationDecisionReasonCode.Refused_MlTimeout => new[] { "ML_TIMEOUT" },
+                LocalizationDecisionReasonCode.Refused_Cancelled => new[] { "CANCELLED" },
+                LocalizationDecisionReasonCode.Refused_ArtifactsNotLoaded => new[] { "MODEL_NOT_LOADED" },
+                LocalizationDecisionReasonCode.Refused_MlException => new[] { "ML_EXCEPTION" },
+                LocalizationDecisionReasonCode.Refused_RuntimeMisconfigured => new[] { "RUNTIME_MISCONFIGURED" },
+                LocalizationDecisionReasonCode.Refused_QueueSaturated => new[] { "QUEUE_SATURATED" },
+                LocalizationDecisionReasonCode.Deferred_Backpressure => new[] { "BACKPRESSURE_DEFERRED" },
+                _ => new[] { record.ReasonCode.ToString() }
+            };
+        }
+
+        private static void WriteEvent(StreamWriter writer, ref int eventIndex, LocalizationEvent evt)
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            using (var jsonWriter = new Utf8JsonWriter(buffer))
+            {
+                jsonWriter.WriteStartObject();
+                jsonWriter.WriteString("schema_version", EventSchemaVersion);
+                jsonWriter.WriteString("run_id", evt.RunId);
+                jsonWriter.WriteNumber("event_index", eventIndex);
+                jsonWriter.WriteString("window_end_utc", evt.WindowEndUtc.ToString("O", CultureInfo.InvariantCulture));
+                jsonWriter.WriteNumber("window_seq", evt.WindowSeq);
+                jsonWriter.WriteString("event_type", evt.EventType);
+
+                if (!string.IsNullOrWhiteSpace(evt.RequestId))
+                {
+                    jsonWriter.WriteString("request_id", evt.RequestId);
+                }
+
+                if (evt.DurationSeconds.HasValue && double.IsFinite(evt.DurationSeconds.Value))
+                {
+                    WriteNumber(jsonWriter, "duration_s", evt.DurationSeconds.Value);
+                }
+
+                if (evt.ChannelCounts is not null)
+                {
+                    WriteIntArray(jsonWriter, "channel_counts", evt.ChannelCounts);
+                }
+
+                if (!string.IsNullOrWhiteSpace(evt.RtState))
+                {
+                    jsonWriter.WriteString("rt_state", evt.RtState);
+                }
+
+                if (evt.TriggerBasis is not null)
+                {
+                    jsonWriter.WritePropertyName("trigger_basis");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WriteString("request_kind", evt.TriggerBasis.RequestKind);
+                    jsonWriter.WriteBoolean("is_manual", evt.TriggerBasis.IsManual);
+                    WriteNumber(jsonWriter, "accumulated_duration_s", evt.TriggerBasis.AccumulatedDurationSeconds);
+                    WriteNumber(jsonWriter, "accumulated_counts_total", evt.TriggerBasis.AccumulatedTotalCounts);
+                    jsonWriter.WriteNumber("check_every_counts", evt.TriggerBasis.CheckEveryCounts);
+                    WriteNumber(jsonWriter, "min_duration_s", evt.TriggerBasis.MinDurationSeconds);
+                    WriteNumber(jsonWriter, "max_duration_s", evt.TriggerBasis.MaxDurationSeconds);
+                    jsonWriter.WriteEndObject();
+                }
+
+                if (evt.RefusalReasonCodes is not null)
+                {
+                    WriteStringArray(jsonWriter, "refusal_reason_codes", evt.RefusalReasonCodes);
+                }
+
+                if (!string.IsNullOrWhiteSpace(evt.Label))
+                {
+                    jsonWriter.WriteString("label", evt.Label);
+                }
+
+                if (evt.CoordsCm is not null)
+                {
+                    WriteDoubleArray(jsonWriter, "coords_cm", evt.CoordsCm);
+                }
+
+                if (evt.Confidence is not null)
+                {
+                    jsonWriter.WritePropertyName("confidence");
+                    jsonWriter.WriteStartObject();
+                    WriteNumber(jsonWriter, "classifier_probability", evt.Confidence.ClassifierProbability);
+                    if (evt.Confidence.InferenceTimeMs.HasValue && double.IsFinite(evt.Confidence.InferenceTimeMs.Value))
+                    {
+                        WriteNumber(jsonWriter, "inference_time_ms", evt.Confidence.InferenceTimeMs.Value);
+                    }
+                    jsonWriter.WriteEndObject();
+                }
+
+                if (!string.IsNullOrWhiteSpace(evt.ModelId))
+                {
+                    jsonWriter.WriteString("model_id", evt.ModelId);
+                }
+
+                if (evt.Ood is not null)
+                {
+                    jsonWriter.WritePropertyName("ood");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WriteBoolean("is_ood", evt.Ood.IsOod);
+                    WriteNumber(jsonWriter, "distance", evt.Ood.Distance);
+                    if (evt.Ood.Threshold.HasValue && double.IsFinite(evt.Ood.Threshold.Value))
+                    {
+                        WriteNumber(jsonWriter, "threshold", evt.Ood.Threshold.Value);
+                    }
+                    jsonWriter.WriteEndObject();
+                }
+
+                jsonWriter.WriteEndObject();
+            }
+
+            writer.WriteLine(Encoding.UTF8.GetString(buffer.WrittenSpan));
+            writer.Flush();
+            eventIndex++;
+        }
+
+        private static void WriteSummary(
+            string summaryPath,
+            string runId,
+            int windowsProcessed,
+            int eventsWritten,
+            int requestsIssued,
+            int requestsRefused,
+            int resultsPublished,
+            int pendingRequests,
+            string eventsHash)
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            using (var jsonWriter = new Utf8JsonWriter(buffer))
+            {
+                jsonWriter.WriteStartObject();
+                jsonWriter.WriteString("schema_version", SummarySchemaVersion);
+                jsonWriter.WriteString("run_id", runId);
+                jsonWriter.WriteNumber("windows_processed", windowsProcessed);
+                jsonWriter.WriteNumber("events_written", eventsWritten);
+                jsonWriter.WriteNumber("requests", requestsIssued);
+                jsonWriter.WriteNumber("refusals", requestsRefused);
+                jsonWriter.WriteNumber("results", resultsPublished);
+                jsonWriter.WriteNumber("pending_requests", pendingRequests);
+                jsonWriter.WriteString("events_sha256", eventsHash);
+                jsonWriter.WriteEndObject();
+            }
+
+            File.WriteAllText(summaryPath, Encoding.UTF8.GetString(buffer.WrittenSpan));
+        }
+
+        private static string ComputeFileHash(string path)
+        {
+            using var sha = SHA256.Create();
+            using var stream = File.OpenRead(path);
+            var hash = sha.ComputeHash(stream);
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        private static void WriteNumber(Utf8JsonWriter writer, string name, double value)
+        {
+            writer.WritePropertyName(name);
+            writer.WriteRawValue(value.ToString("G17", CultureInfo.InvariantCulture), skipInputValidation: true);
+        }
+
+        private static void WriteIntArray(Utf8JsonWriter writer, string name, IReadOnlyList<int> values)
+        {
+            writer.WritePropertyName(name);
+            writer.WriteStartArray();
+            foreach (var value in values)
+            {
+                writer.WriteNumberValue(value);
+            }
+            writer.WriteEndArray();
+        }
+
+        private static void WriteDoubleArray(Utf8JsonWriter writer, string name, IReadOnlyList<double> values)
+        {
+            writer.WritePropertyName(name);
+            writer.WriteStartArray();
+            foreach (var value in values)
+            {
+                writer.WriteRawValue(value.ToString("G17", CultureInfo.InvariantCulture), skipInputValidation: true);
+            }
+            writer.WriteEndArray();
+        }
+
+        private static void WriteStringArray(Utf8JsonWriter writer, string name, IReadOnlyList<string> values)
+        {
+            writer.WritePropertyName(name);
+            writer.WriteStartArray();
+            foreach (var value in values)
+            {
+                writer.WriteStringValue(value);
+            }
+            writer.WriteEndArray();
         }
 
         private static RtWindowSummary ParseWindowSummary(string line)
@@ -431,97 +892,6 @@ namespace Listen_N
             var guidBytes = new byte[16];
             Array.Copy(bytes, guidBytes, guidBytes.Length);
             return new Guid(guidBytes);
-        }
-
-        private static Guid BuildDeterministicGuid(int index, DateTimeOffset windowEndUtc)
-        {
-            var bytes = new byte[16];
-            BitConverter.GetBytes(index).CopyTo(bytes, 0);
-            BitConverter.GetBytes(windowEndUtc.UtcTicks).CopyTo(bytes, 4);
-            return new Guid(bytes);
-        }
-
-        private static DateTimeOffset ResolveWindowEndUtc(
-            Guid episodeId,
-            DateTimeOffset? fallback,
-            Dictionary<Guid, RtLocalizationRequest> lastRequestByEpisode)
-        {
-            lock (lastRequestByEpisode)
-            {
-                if (lastRequestByEpisode.TryGetValue(episodeId, out var request)
-                    && request.Row.WindowEndUtc.HasValue)
-                {
-                    return request.Row.WindowEndUtc.Value;
-                }
-            }
-
-            return fallback ?? DateTimeOffset.MinValue;
-        }
-
-        private static LocalizationReplayEvent BuildEvent(
-            string eventType,
-            string runId,
-            DateTimeOffset eventTimeUtc,
-            DateTimeOffset windowEndUtc,
-            string? reason,
-            double? requestedDurationSeconds,
-            IReadOnlyList<double>? result,
-            LocalizationDecisionRecord record)
-        {
-            double? resultX = null;
-            double? resultY = null;
-            double? resultZ = null;
-            if (result != null && result.Count >= 3)
-            {
-                resultX = result[0];
-                resultY = result[1];
-                resultZ = result[2];
-            }
-
-            return new LocalizationReplayEvent
-            {
-                EventTimeUtc = eventTimeUtc,
-                EventType = eventType,
-                RunId = runId,
-                WindowEndUtc = windowEndUtc,
-                Reason = reason,
-                RequestedDurationSeconds = requestedDurationSeconds,
-                ResultX = resultX,
-                ResultY = resultY,
-                ResultZ = resultZ,
-                Confidence = record.MlContext?.ClassifierProbability,
-                ModelId = record.MlContext?.ModelId,
-                OutcomeLabel = record.MlContext?.OutcomeLabel
-            };
-        }
-
-        private static void WriteEvent(StreamWriter writer, object writeLock, LocalizationReplayEvent evt)
-        {
-            lock (writeLock)
-            {
-                string json = JsonSerializer.Serialize(evt, EventSerializerOptions);
-                writer.WriteLine(json);
-                writer.Flush();
-            }
-        }
-
-        private static void WaitForPendingRequests(ref int pendingRequests, bool workerFaulted)
-        {
-            if (workerFaulted)
-            {
-                return;
-            }
-
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-            while (Interlocked.CompareExchange(ref pendingRequests, 0, 0) > 0)
-            {
-                if (stopwatch.Elapsed > TimeSpan.FromSeconds(10))
-                {
-                    break;
-                }
-
-                Thread.Sleep(10);
-            }
         }
 
         private static void AwaitWorker(Task workerTask)
@@ -675,52 +1045,68 @@ namespace Listen_N
 
         private static void PrintUsage()
         {
-            Console.WriteLine("Usage: Listen-N localize --input <rt_windows.ndjson> --output <dir> [--policy <path>] [--run-id <id>]");
+            Console.WriteLine("Usage: Listen-N localize-replay --input <rt_windows.ndjson> --output <dir> --models <dir> [--config <path>] [--run-id <id>]");
+            Console.WriteLine("       Listen-N localize --replay --input <rt_windows.ndjson> --output <dir> --models <dir> [--config <path>] [--run-id <id>]");
         }
 
-        private sealed record LocalizationReplayEvent
+        private sealed record RequestContext
         {
-            [JsonPropertyName("event_time_utc")]
-            public required DateTimeOffset EventTimeUtc { get; init; }
-
-            [JsonPropertyName("event_type")]
-            public required string EventType { get; init; }
-
-            [JsonPropertyName("run_id")]
-            public required string RunId { get; init; }
-
-            [JsonPropertyName("window_end_utc")]
+            public required string RequestId { get; init; }
+            public required Guid EpisodeId { get; init; }
+            public required int WindowSeq { get; init; }
             public required DateTimeOffset WindowEndUtc { get; init; }
+            public required double DurationSeconds { get; init; }
+            public required int[] ChannelCounts { get; init; }
+            public required string RtState { get; init; }
+            public required bool IsManual { get; init; }
+            public required bool IsProbe { get; init; }
+            public required long Sequence { get; init; }
+            public required double TotalCounts { get; init; }
+        }
 
-            [JsonPropertyName("reason")]
-            public string? Reason { get; init; }
+        private sealed record WorkerResult(RtLocalizationRequest Request, LocalizationPrediction Prediction);
 
-            [JsonPropertyName("requested_duration_s")]
-            public double? RequestedDurationSeconds { get; init; }
-
-            [JsonPropertyName("result_x")]
-            public double? ResultX { get; init; }
-
-            [JsonPropertyName("result_y")]
-            public double? ResultY { get; init; }
-
-            [JsonPropertyName("result_z")]
-            public double? ResultZ { get; init; }
-
-            [JsonPropertyName("confidence")]
-            public double? Confidence { get; init; }
-
-            [JsonPropertyName("model_id")]
-            public string? ModelId { get; init; }
-
-            [JsonPropertyName("outcome_label")]
-            public string? OutcomeLabel { get; init; }
-
-            [JsonPropertyName("triggered")]
-            public bool? Triggered { get; init; }
-
-            [JsonPropertyName("rt_state")]
+        private sealed record LocalizationEvent
+        {
+            public required string EventType { get; init; }
+            public required string RunId { get; init; }
+            public required DateTimeOffset WindowEndUtc { get; init; }
+            public required int WindowSeq { get; init; }
+            public string? RequestId { get; init; }
+            public double? DurationSeconds { get; init; }
+            public int[]? ChannelCounts { get; init; }
             public string? RtState { get; init; }
+            public TriggerBasis? TriggerBasis { get; init; }
+            public string[]? RefusalReasonCodes { get; init; }
+            public string? Label { get; init; }
+            public double[]? CoordsCm { get; init; }
+            public LocalizationConfidence? Confidence { get; init; }
+            public LocalizationOod? Ood { get; init; }
+            public string? ModelId { get; init; }
+        }
+
+        private sealed record TriggerBasis
+        {
+            public required string RequestKind { get; init; }
+            public required bool IsManual { get; init; }
+            public required double AccumulatedDurationSeconds { get; init; }
+            public required double AccumulatedTotalCounts { get; init; }
+            public required int CheckEveryCounts { get; init; }
+            public required double MinDurationSeconds { get; init; }
+            public required double MaxDurationSeconds { get; init; }
+        }
+
+        private sealed record LocalizationConfidence
+        {
+            public required double ClassifierProbability { get; init; }
+            public double? InferenceTimeMs { get; init; }
+        }
+
+        private sealed record LocalizationOod
+        {
+            public required bool IsOod { get; init; }
+            public required double Distance { get; init; }
+            public double? Threshold { get; init; }
         }
 
     }

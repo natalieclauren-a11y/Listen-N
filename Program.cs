@@ -17,7 +17,8 @@ namespace Listen_N
 
             if (args.Length > 0
                 && (string.Equals(args[0], "localize", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(args[0], "localize_replay", StringComparison.OrdinalIgnoreCase)))
+                    || string.Equals(args[0], "localize_replay", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[0], "localize-replay", StringComparison.OrdinalIgnoreCase)))
             {
                 int exitCode = LocalizationReplayRunner.RunCli(args.Skip(1).ToArray());
                 Environment.Exit(exitCode);
