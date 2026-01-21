@@ -147,54 +147,12 @@ namespace Listen_N
                 return 1;
             }
 
-            LocalizationReplayDependencies resolvedDependencies;
-            try
-            {
-                resolvedDependencies = dependencies ?? LoadDependencies(options.ConfigPath, options.ModelsDirectory);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Localization artifacts missing or invalid: {ex.Message}");
-                return 1;
-            }
-            var policy = new LocalizationEpisodePolicy(resolvedDependencies.EpisodePolicyConfig, resolvedDependencies.Thresholds)
-            {
-                AutoModeEnabled = true,
-                RunId = ResolveRunGuid(runId)
-            };
-
-            var worker = resolvedDependencies.Worker;
-            var health = new LocalizationHealthTracker(
-                resolvedDependencies.RuntimeConfig.DegradedRefusalThreshold,
-                resolvedDependencies.RuntimeConfig.DegradedQueueSaturationThreshold);
-            var limiter = new LocalizationMlRequestLimiter(worker, policy, resolvedDependencies.RuntimeConfig, health);
-
-            int windowsProcessed = 0;
-            int requestsIssued = 0;
-            int resultsPublished = 0;
-            int requestsRefused = 0;
-            int pendingRequests = 0;
-            bool workerFaulted = false;
-            bool replayFailed = false;
-            Exception? workerException = null;
-            DateTimeOffset? currentWindowEndUtc = null;
-            string? currentRtState = null;
-            int currentWindowSeq = -1;
-            int eventIndex = 0;
-            int requestCounter = 0;
-
-            var lastRequestByEpisode = new Dictionary<Guid, RequestContext>();
-            var requestsBySequence = new Dictionary<long, RequestContext>();
-            var requestsById = new Dictionary<string, RequestContext>(StringComparer.Ordinal);
-            var pendingRequestIds = new HashSet<string>(StringComparer.Ordinal);
-            var workerResults = new Queue<WorkerResult>();
-            var workerSignal = new AutoResetEvent(false);
-
             string eventsPath = Path.Combine(options.OutputDirectory, "localization_events.ndjson");
             StreamWriter? writer = null;
             try
             {
-                writer = new StreamWriter(eventsPath, append: false);
+                var stream = new FileStream(eventsPath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                writer = new StreamWriter(stream, Encoding.UTF8);
             }
             catch (Exception ex)
             {
@@ -204,132 +162,237 @@ namespace Listen_N
 
             using (writer)
             {
-                using var cts = new CancellationTokenSource();
-                Task workerTask = worker.Start(cts.Token);
-
-                policy.OnRequestMl += request =>
+                void Emit(object evt)
                 {
-                    var context = BuildRequestContext(runId, request, currentWindowSeq, currentWindowEndUtc, currentRtState, requestCounter);
-                    requestCounter++;
-                    requestsIssued++;
+                    writer.WriteLine(JsonSerializer.Serialize(evt));
+                }
 
-                    lock (lastRequestByEpisode)
-                    {
-                        lastRequestByEpisode[request.EpisodeId] = context;
-                        requestsBySequence[request.Sequence] = context;
-                        requestsById[context.RequestId] = context;
-                        pendingRequestIds.Add(context.RequestId);
-                        pendingRequests = pendingRequestIds.Count;
-                    }
-
-                    WriteEvent(writer, ref eventIndex, BuildRequestEvent(runId, context, resolvedDependencies.EpisodePolicyConfig));
-                    limiter.HandleRequest(request);
-                };
-
-                worker.OnResult += (request, prediction) =>
+                Emit(new
                 {
-                    lock (workerResults)
-                    {
-                        workerResults.Enqueue(new WorkerResult(request, prediction));
-                    }
-                    workerSignal.Set();
-                };
+                    type = "ReplayStarted",
+                    run_id = runId,
+                    input = options.InputPath,
+                    output = options.OutputDirectory,
+                    models = options.ModelsDirectory ?? string.Empty,
+                    started_utc = DateTimeOffset.UtcNow
+                });
+                writer.Flush();
 
-                worker.OnWorkerFaulted += ex =>
-                {
-                    workerFaulted = true;
-                    workerException = ex;
-                };
-
-                policy.NowProvider = () => currentWindowEndUtc ?? DateTimeOffset.MinValue;
-
-                policy.OnDecisionRecord += record =>
-                {
-                    if (record.DecisionKind == LocalizationDecisionKind.Publish)
-                    {
-                        var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
-                        if (context is not null)
-                        {
-                            WriteEvent(writer, ref eventIndex, BuildResultEvent(runId, context, record));
-                            RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
-                            resultsPublished++;
-                        }
-                        return;
-                    }
-
-                    if (record.DecisionKind == LocalizationDecisionKind.Refuse)
-                    {
-                        var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
-                        if (context is not null)
-                        {
-                            WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, record));
-                            RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
-                            requestsRefused++;
-                        }
-                        return;
-                    }
-
-                    if (record.DecisionKind == LocalizationDecisionKind.Defer
-                        && record.ReasonCode == LocalizationDecisionReasonCode.Deferred_Backpressure)
-                    {
-                        var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
-                        if (context is not null)
-                        {
-                            WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, record));
-                            RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
-                            requestsRefused++;
-                        }
-                    }
-                };
+                int windowsSeen = 0;
+                int triggerFires = 0;
+                int localizationRequests = 0;
+                int refusals = 0;
+                int results = 0;
+                Exception? replayException = null;
+                bool writeSummary = false;
+                int windowsProcessed = 0;
+                int requestsIssued = 0;
+                int resultsPublished = 0;
+                int requestsRefused = 0;
+                int pendingRequests = 0;
+                bool workerFaulted = false;
+                bool replayFailed = false;
+                int eventIndex = 0;
 
                 try
                 {
-                    foreach (string line in File.ReadLines(options.InputPath))
+                    LocalizationReplayDependencies resolvedDependencies;
+                    try
                     {
-                        if (string.IsNullOrWhiteSpace(line))
+                        resolvedDependencies = dependencies ?? LoadDependencies(options.ConfigPath, options.ModelsDirectory);
+                    }
+                    catch (Exception ex)
+                    {
+                        replayException = ex;
+                        Console.Error.WriteLine($"Localization artifacts missing or invalid: {ex.Message}");
+                        return 1;
+                    }
+
+                    var policy = new LocalizationEpisodePolicy(resolvedDependencies.EpisodePolicyConfig, resolvedDependencies.Thresholds)
+                    {
+                        AutoModeEnabled = true,
+                        RunId = ResolveRunGuid(runId)
+                    };
+
+                    var worker = resolvedDependencies.Worker;
+                    var health = new LocalizationHealthTracker(
+                        resolvedDependencies.RuntimeConfig.DegradedRefusalThreshold,
+                        resolvedDependencies.RuntimeConfig.DegradedQueueSaturationThreshold);
+                    var limiter = new LocalizationMlRequestLimiter(worker, policy, resolvedDependencies.RuntimeConfig, health);
+
+                    Exception? workerException = null;
+                    DateTimeOffset? currentWindowEndUtc = null;
+                    string? currentRtState = null;
+                    int currentWindowSeq = -1;
+                    int requestCounter = 0;
+
+                    var lastRequestByEpisode = new Dictionary<Guid, RequestContext>();
+                    var requestsBySequence = new Dictionary<long, RequestContext>();
+                    var requestsById = new Dictionary<string, RequestContext>(StringComparer.Ordinal);
+                    var pendingRequestIds = new HashSet<string>(StringComparer.Ordinal);
+                    var workerResults = new Queue<WorkerResult>();
+                    var workerSignal = new AutoResetEvent(false);
+
+                    using var cts = new CancellationTokenSource();
+                    Task workerTask = worker.Start(cts.Token);
+
+                    policy.OnRequestMl += request =>
+                    {
+                        var context = BuildRequestContext(runId, request, currentWindowSeq, currentWindowEndUtc, currentRtState, requestCounter);
+                        requestCounter++;
+                        requestsIssued++;
+                        triggerFires++;
+                        localizationRequests++;
+
+                        lock (lastRequestByEpisode)
                         {
-                            continue;
+                            lastRequestByEpisode[request.EpisodeId] = context;
+                            requestsBySequence[request.Sequence] = context;
+                            requestsById[context.RequestId] = context;
+                            pendingRequestIds.Add(context.RequestId);
+                            pendingRequests = pendingRequestIds.Count;
                         }
 
-                        RtWindowSummary window = ParseWindowSummary(line);
-                        windowsProcessed++;
-                        currentWindowSeq++;
-                        currentWindowEndUtc = window.WindowEndUtc;
-                        currentRtState = window.RtState;
+                        WriteEvent(writer, ref eventIndex, BuildRequestEvent(runId, context, resolvedDependencies.EpisodePolicyConfig));
+                        limiter.HandleRequest(request);
+                    };
 
-                        policy.AddWindow(window);
-                        DrainWorkerResults(policy, workerResults, pendingRequestIds, ref pendingRequests, requestsBySequence);
-
-                        if (workerFaulted)
+                    worker.OnResult += (request, prediction) =>
+                    {
+                        lock (workerResults)
                         {
-                            throw new InvalidOperationException(workerException?.Message ?? "Localization worker faulted.");
+                            workerResults.Enqueue(new WorkerResult(request, prediction));
+                        }
+                        workerSignal.Set();
+                    };
+
+                    worker.OnWorkerFaulted += ex =>
+                    {
+                        workerFaulted = true;
+                        workerException = ex;
+                    };
+
+                    policy.NowProvider = () => currentWindowEndUtc ?? DateTimeOffset.MinValue;
+
+                    policy.OnDecisionRecord += record =>
+                    {
+                        if (record.DecisionKind == LocalizationDecisionKind.Publish)
+                        {
+                            var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
+                            if (context is not null)
+                            {
+                                WriteEvent(writer, ref eventIndex, BuildResultEvent(runId, context, record));
+                                RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                                resultsPublished++;
+                                results++;
+                            }
+                            return;
+                        }
+
+                        if (record.DecisionKind == LocalizationDecisionKind.Refuse)
+                        {
+                            var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
+                            if (context is not null)
+                            {
+                                WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, record));
+                                RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                                requestsRefused++;
+                                refusals++;
+                            }
+                            return;
+                        }
+
+                        if (record.DecisionKind == LocalizationDecisionKind.Defer
+                            && record.ReasonCode == LocalizationDecisionReasonCode.Deferred_Backpressure)
+                        {
+                            var context = ResolveRequestContext(record.EpisodeId, lastRequestByEpisode);
+                            if (context is not null)
+                            {
+                                WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, record));
+                                RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
+                                requestsRefused++;
+                                refusals++;
+                            }
+                        }
+                    };
+
+                    try
+                    {
+                        foreach (string line in File.ReadLines(options.InputPath))
+                        {
+                            if (string.IsNullOrWhiteSpace(line))
+                            {
+                                continue;
+                            }
+
+                            RtWindowSummary window = ParseWindowSummary(line);
+                            windowsProcessed++;
+                            windowsSeen++;
+                            currentWindowSeq++;
+                            currentWindowEndUtc = window.WindowEndUtc;
+                            currentRtState = window.RtState;
+
+                            policy.AddWindow(window);
+                            DrainWorkerResults(policy, workerResults, pendingRequestIds, ref pendingRequests, requestsBySequence);
+
+                            if (workerFaulted)
+                            {
+                                throw new InvalidOperationException(workerException?.Message ?? "Localization worker faulted.");
+                            }
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"Failed to process localization replay: {ex.Message}");
-                    return 1;
+                    catch (Exception ex)
+                    {
+                        replayException = ex;
+                        Console.Error.WriteLine($"Failed to process localization replay: {ex.Message}");
+                        return 1;
+                    }
+                    finally
+                    {
+                        bool drained = WaitForPendingRequests(ref pendingRequests, workerFaulted, workerResults, workerSignal, policy, pendingRequestIds, requestsById, writer, ref eventIndex, runId, requestsBySequence, ref requestsRefused, ref refusals);
+                        if (!drained)
+                        {
+                            Console.Error.WriteLine("Localization replay ended with undrained ML requests.");
+                            replayFailed = true;
+                        }
+                        cts.Cancel();
+                        AwaitWorker(workerTask);
+                    }
+
+                    Console.WriteLine($"windows_processed={windowsProcessed}, requests={requestsIssued}, refused={requestsRefused}, results={resultsPublished}");
+                    writeSummary = true;
+                    return workerFaulted || replayFailed ? 1 : 0;
                 }
                 finally
                 {
-                    bool drained = WaitForPendingRequests(ref pendingRequests, workerFaulted, workerResults, workerSignal, policy, pendingRequestIds, requestsById, writer, ref eventIndex, runId, requestsBySequence, ref requestsRefused);
-                    if (!drained)
+                    var finished = new Dictionary<string, object?>
                     {
-                        Console.Error.WriteLine("Localization replay ended with undrained ML requests.");
-                        replayFailed = true;
+                        ["type"] = "ReplayFinished",
+                        ["run_id"] = runId,
+                        ["finished_utc"] = DateTimeOffset.UtcNow,
+                        ["windows_seen"] = windowsSeen,
+                        ["trigger_fires"] = triggerFires,
+                        ["localization_requests"] = localizationRequests,
+                        ["refusals"] = refusals,
+                        ["results"] = results
+                    };
+
+                    if (replayException is not null)
+                    {
+                        finished["error"] = replayException.ToString();
                     }
-                    cts.Cancel();
-                    AwaitWorker(workerTask);
+
+                    Emit(finished);
+                    writer.Flush();
+
+                    if (writeSummary)
+                    {
+                        string summaryPath = Path.Combine(options.OutputDirectory, "localization_replay_summary.json");
+                        string eventsHash = ComputeFileHash(eventsPath);
+                        WriteSummary(summaryPath, runId, windowsProcessed, eventIndex, requestsIssued, requestsRefused, resultsPublished, pendingRequests, eventsHash);
+                    }
                 }
             }
-
-            string summaryPath = Path.Combine(options.OutputDirectory, "localization_replay_summary.json");
-            string eventsHash = ComputeFileHash(eventsPath);
-            WriteSummary(summaryPath, runId, windowsProcessed, eventIndex, requestsIssued, requestsRefused, resultsPublished, pendingRequests, eventsHash);
-
-            Console.WriteLine($"windows_processed={windowsProcessed}, requests={requestsIssued}, refused={requestsRefused}, results={resultsPublished}");
-            return workerFaulted || replayFailed ? 1 : 0;
         }
 
         private static LocalizationReplayDependencies LoadDependencies(string? configPath, string? modelsDirectory)
@@ -607,7 +670,8 @@ namespace Listen_N
             ref int eventIndex,
             string runId,
             Dictionary<long, RequestContext> requestsBySequence,
-            ref int requestsRefused)
+            ref int requestsRefused,
+            ref int refusals)
         {
             if (workerFaulted)
             {
@@ -622,6 +686,7 @@ namespace Listen_N
                     WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, new[] { "WORKER_FAULTED" }));
                     RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
                     requestsRefused++;
+                    refusals++;
                 }
                 return false;
             }
@@ -656,6 +721,7 @@ namespace Listen_N
                     WriteEvent(writer, ref eventIndex, BuildRefusalEvent(runId, context, new[] { "PENDING_REQUESTS_NOT_DRAINED" }));
                     RemovePendingRequest(context, pendingRequestIds, ref pendingRequests);
                     requestsRefused++;
+                    refusals++;
                 }
             }
 
