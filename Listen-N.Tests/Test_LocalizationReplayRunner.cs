@@ -11,7 +11,7 @@ namespace Listen_N.Tests
     public sealed class LocalizationReplayRunnerTests
     {
         [Fact]
-        public void LocalizeReplay_WritesTriggerEvents()
+        public void LocalizeReplay_WritesLocalizationEvents()
         {
             using var tempDir = Directory.CreateTempSubdirectory();
             string inputPath = Path.Combine(tempDir.FullName, "rt_windows.ndjson");
@@ -19,25 +19,22 @@ namespace Listen_N.Tests
             Directory.CreateDirectory(outputDir);
 
             var start = new DateTimeOffset(2024, 01, 01, 0, 0, 0, TimeSpan.Zero);
-            var counts = Enumerable.Repeat(5.0, 15).ToArray();
+            var counts = Enumerable.Repeat(50.0, 15).ToArray();
             using (var writer = new StreamWriter(inputPath))
             {
-                for (int i = 0; i < 6; i++)
+                var windowStart = start;
+                var windowEnd = start.AddSeconds(1);
+                var record = new
                 {
-                    var windowStart = start.AddSeconds(i);
-                    var windowEnd = start.AddSeconds(i + 1);
-                    var record = new
-                    {
-                        window_start_utc = windowStart.ToString("O"),
-                        window_end_utc = windowEnd.ToString("O"),
-                        duration_seconds = 1.0,
-                        counts15 = counts,
-                        rt_state = "Nominal",
-                        rate_total_cps = 75.0,
-                        quality_scalar = 5.0
-                    };
-                    writer.WriteLine(JsonSerializer.Serialize(record));
-                }
+                    window_start_utc = windowStart.ToString("O"),
+                    window_end_utc = windowEnd.ToString("O"),
+                    duration_seconds = 1.0,
+                    counts15 = counts,
+                    rt_state = "Hold",
+                    rate_total_cps = 750.0,
+                    quality_scalar = 5.0
+                };
+                writer.WriteLine(JsonSerializer.Serialize(record));
             }
 
             var runtimeConfig = new LocalizationRuntimeConfig
@@ -56,7 +53,14 @@ namespace Listen_N.Tests
             var dependencies = new LocalizationReplayDependencies
             {
                 Worker = worker,
-                EpisodePolicyConfig = new LocalizationEpisodePolicyConfig(),
+                EpisodePolicyConfig = new LocalizationEpisodePolicyConfig
+                {
+                    ConfuseDebounceWindows = 1,
+                    RecoverDebounceWindows = 1,
+                    MinPublishDurationSeconds = 1.0,
+                    MaxPublishDurationSeconds = 1.0,
+                    CheckEveryCounts = 1
+                },
                 Thresholds = TriggerPolicyThresholds.Defaults,
                 RuntimeConfig = runtimeConfig
             };
@@ -73,8 +77,24 @@ namespace Listen_N.Tests
 
             string eventsPath = Path.Combine(outputDir, "localization_events.ndjson");
             Assert.True(File.Exists(eventsPath));
-            string contents = File.ReadAllText(eventsPath);
-            Assert.Contains("\"event_type\":\"trigger_evaluated\"", contents);
+            string[] lines = File.ReadAllLines(eventsPath);
+            Assert.NotEmpty(lines);
+
+            var eventTypes = lines.Select(line =>
+            {
+                using var document = JsonDocument.Parse(line);
+                return document.RootElement.GetProperty("event_type").GetString();
+            }).ToList();
+
+            Assert.Contains("localization_requested", eventTypes);
+            Assert.Contains("localization_result", eventTypes);
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                using var document = JsonDocument.Parse(lines[i]);
+                Assert.Equal("loc_events.v1", document.RootElement.GetProperty("schema_version").GetString());
+                Assert.Equal(i, document.RootElement.GetProperty("event_index").GetInt32());
+            }
         }
 
         private sealed class StubLocalizer : ILocalizer
