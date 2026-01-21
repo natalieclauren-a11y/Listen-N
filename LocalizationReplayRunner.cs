@@ -343,19 +343,17 @@ namespace Listen_N
             {
                 runtimeConfig = runtimeConfig with { ArtifactsDirectory = modelsDirectory };
             }
-            var validation = runtimeConfig.Validate(baseDirectory);
-            if (!validation.IsValid)
-            {
-                throw new InvalidOperationException(string.Join("; ", validation.Errors));
-            }
 
-            string artifactsDirectory = validation.ResolvedArtifactsDirectory ?? runtimeConfig.ArtifactsDirectory;
-            var artifacts = LocalizationArtifactsLoader.Load(artifactsDirectory);
+            string artifactsDirectory = ResolvePath(runtimeConfig.ArtifactsDirectory, baseDirectory);
+            string triggerPolicyPath = ResolvePath(runtimeConfig.TriggerPolicyPath, baseDirectory, artifactsDirectory);
+            ValidateRuntimeConfig(runtimeConfig, artifactsDirectory, triggerPolicyPath);
+            ValidatePipelineBundle(artifactsDirectory);
 
-            TriggerPolicyThresholds thresholds = artifacts.Thresholds;
-            LocalizationEpisodePolicyConfig config = artifacts.PolicyConfig;
+            var policy = LoadTriggerPolicy(triggerPolicyPath);
+            (TriggerPolicyThresholds thresholds, LocalizationEpisodePolicyConfig config) = policy.ToPolicyInputs();
 
-            var worker = new LocalizationWorker(artifacts.Pipeline, runtimeConfig.MaxMlQueueDepth);
+            var pipeline = Localization.ML.LocalizationPipeline.Load(artifactsDirectory);
+            var worker = new LocalizationWorker(pipeline, runtimeConfig.MaxMlQueueDepth);
             return new LocalizationReplayDependencies
             {
                 Worker = worker,
@@ -363,6 +361,136 @@ namespace Listen_N
                 Thresholds = thresholds,
                 RuntimeConfig = runtimeConfig
             };
+        }
+
+        private static void ValidateRuntimeConfig(
+            LocalizationRuntimeConfig runtimeConfig,
+            string artifactsDirectory,
+            string triggerPolicyPath)
+        {
+            var errors = new List<string>();
+
+            if (!Directory.Exists(artifactsDirectory))
+            {
+                errors.Add($"Artifacts directory not found at {artifactsDirectory}.");
+            }
+
+            if (!File.Exists(triggerPolicyPath))
+            {
+                errors.Add($"Trigger policy not found at {triggerPolicyPath}.");
+            }
+            else
+            {
+                try
+                {
+                    var json = File.ReadAllText(triggerPolicyPath);
+                    var policy = JsonSerializer.Deserialize<TriggerPolicyDocument>(json, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+                    if (policy is null)
+                    {
+                        errors.Add("Trigger policy deserialized to null.");
+                    }
+                    else
+                    {
+                        policy.ToPolicyInputs();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Trigger policy invalid: {ex.Message}");
+                }
+            }
+
+            if (runtimeConfig.SupportedTrainingDurationsSec is null || runtimeConfig.SupportedTrainingDurationsSec.Count == 0)
+            {
+                errors.Add("SupportedTrainingDurationsSec must include at least one duration.");
+            }
+
+            if (runtimeConfig.MaxMlQueueDepth <= 0)
+            {
+                errors.Add("MaxMlQueueDepth must be positive.");
+            }
+
+            if (runtimeConfig.MaxMlRequestsPerEpisode <= 0)
+            {
+                errors.Add("MaxMlRequestsPerEpisode must be positive.");
+            }
+
+            if (errors.Count > 0)
+            {
+                throw new InvalidOperationException(string.Join("; ", errors));
+            }
+        }
+
+        private static TriggerPolicyDocument LoadTriggerPolicy(string triggerPolicyPath)
+        {
+            try
+            {
+                var json = File.ReadAllText(triggerPolicyPath);
+                return JsonSerializer.Deserialize<TriggerPolicyDocument>(json, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    })
+                    ?? throw new InvalidOperationException("Trigger policy deserialized to null.");
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Trigger policy invalid: {ex.Message}", ex);
+            }
+        }
+
+        private static void ValidatePipelineBundle(string artifactsDirectory)
+        {
+            string pipelineConfigPath = Path.Combine(artifactsDirectory, "pipeline_config.json");
+            if (!File.Exists(pipelineConfigPath))
+            {
+                throw new InvalidOperationException($"pipeline_config.json not found at {pipelineConfigPath}.");
+            }
+
+            string classifierPath = Path.Combine(artifactsDirectory, "classifier.zip");
+            if (!File.Exists(classifierPath))
+            {
+                throw new InvalidOperationException($"classifier.zip not found at {classifierPath}.");
+            }
+
+            ValidateRegressorDirectory(artifactsDirectory, "single_regressor");
+            ValidateRegressorDirectory(artifactsDirectory, "dual_regressor");
+        }
+
+        private static void ValidateRegressorDirectory(string artifactsDirectory, string directoryName)
+        {
+            string directoryPath = Path.Combine(artifactsDirectory, directoryName);
+            if (!Directory.Exists(directoryPath))
+            {
+                throw new InvalidOperationException($"{directoryName} directory not found at {directoryPath}.");
+            }
+
+            if (!Directory.EnumerateFiles(directoryPath, "reg_*.zip").Any())
+            {
+                throw new InvalidOperationException($"{directoryName} directory at {directoryPath} does not contain any reg_*.zip files.");
+            }
+        }
+
+        private static string ResolvePath(string path, string? baseDirectory, string? artifactsDirectory = null)
+        {
+            if (Path.IsPathRooted(path))
+            {
+                return path;
+            }
+
+            if (!string.IsNullOrWhiteSpace(artifactsDirectory))
+            {
+                return Path.Combine(artifactsDirectory, path);
+            }
+
+            if (!string.IsNullOrWhiteSpace(baseDirectory))
+            {
+                return Path.Combine(baseDirectory, path);
+            }
+
+            return path;
         }
 
         private static RequestContext BuildRequestContext(
