@@ -177,128 +177,130 @@ namespace Listen_N
             }
 
             using (writer)
-            using var cts = new CancellationTokenSource();
-            Task workerTask = worker.Start(cts.Token);
-
-            policy.OnRequestMl += request =>
             {
-                lock (lastRequestByEpisode)
+                using var cts = new CancellationTokenSource();
+                Task workerTask = worker.Start(cts.Token);
+
+                policy.OnRequestMl += request =>
                 {
-                    lastRequestByEpisode[request.EpisodeId] = request;
-                }
-
-                Interlocked.Increment(ref pendingRequests);
-                limiter.HandleRequest(request);
-            };
-
-            worker.OnResult += (request, prediction) =>
-            {
-                policy.OnMlResult(request, prediction);
-                Interlocked.Decrement(ref pendingRequests);
-            };
-
-            worker.OnWorkerFaulted += ex =>
-            {
-                workerFaulted = true;
-                workerException = ex;
-            };
-
-            policy.NowProvider = () => currentWindowEndUtc ?? DateTimeOffset.MinValue;
-
-            policy.OnDecisionRecord += record =>
-            {
-                if (record.DecisionKind == LocalizationDecisionKind.EpisodeStart)
-                {
-                    episodesStarted++;
-                    var evt = BuildEvent(
-                        "episode_started",
-                        runId,
-                        currentWindowEndUtc ?? DateTimeOffset.MinValue,
-                        currentWindowEndUtc ?? DateTimeOffset.MinValue,
-                        reason: null,
-                        requestedDurationSeconds: record.EpisodeContext.AccumulatedDurationSeconds,
-                        result: null,
-                        record);
-                    WriteEvent(writer, writeLock, evt);
-                    return;
-                }
-
-                if (record.DecisionKind == LocalizationDecisionKind.Publish)
-                {
-                    episodesCompleted++;
-                    var evt = BuildEvent(
-                        "episode_completed",
-                        runId,
-                        ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                        ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                        reason: null,
-                        requestedDurationSeconds: null,
-                        result: record.Result.PublishedCoords,
-                        record);
-                    WriteEvent(writer, writeLock, evt);
-                    return;
-                }
-
-                if (record.DecisionKind == LocalizationDecisionKind.Refuse)
-                {
-                    episodesRefused++;
-                    var evt = BuildEvent(
-                        "episode_refused",
-                        runId,
-                        ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                        ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
-                        reason: record.ReasonCode.ToString(),
-                        requestedDurationSeconds: null,
-                        result: null,
-                        record);
-                    WriteEvent(writer, writeLock, evt);
-                }
-            };
-
-            try
-            {
-                foreach (string line in File.ReadLines(options.InputPath))
-                {
-                    if (string.IsNullOrWhiteSpace(line))
+                    lock (lastRequestByEpisode)
                     {
-                        continue;
+                        lastRequestByEpisode[request.EpisodeId] = request;
                     }
 
-                    RtWindowSummary window = ParseWindowSummary(line);
-                    windowsProcessed++;
-                    currentWindowEndUtc = window.WindowEndUtc;
+                    Interlocked.Increment(ref pendingRequests);
+                    limiter.HandleRequest(request);
+                };
 
-                    var snapshot = BuildSnapshot(window, windowsProcessed);
-                    bool triggered = triggerPolicy.ShouldTrigger(snapshot);
-                    var triggerEvent = new LocalizationReplayEvent
+                worker.OnResult += (request, prediction) =>
+                {
+                    policy.OnMlResult(request, prediction);
+                    Interlocked.Decrement(ref pendingRequests);
+                };
+
+                worker.OnWorkerFaulted += ex =>
+                {
+                    workerFaulted = true;
+                    workerException = ex;
+                };
+
+                policy.NowProvider = () => currentWindowEndUtc ?? DateTimeOffset.MinValue;
+
+                policy.OnDecisionRecord += record =>
+                {
+                    if (record.DecisionKind == LocalizationDecisionKind.EpisodeStart)
                     {
-                        EventTimeUtc = window.WindowEndUtc,
-                        EventType = "trigger_evaluated",
-                        RunId = runId,
-                        WindowEndUtc = window.WindowEndUtc,
-                        Triggered = triggered,
-                        RtState = window.RtState
-                    };
-                    WriteEvent(writer, writeLock, triggerEvent);
+                        episodesStarted++;
+                        var evt = BuildEvent(
+                            "episode_started",
+                            runId,
+                            currentWindowEndUtc ?? DateTimeOffset.MinValue,
+                            currentWindowEndUtc ?? DateTimeOffset.MinValue,
+                            reason: null,
+                            requestedDurationSeconds: record.EpisodeContext.AccumulatedDurationSeconds,
+                            result: null,
+                            record);
+                        WriteEvent(writer, writeLock, evt);
+                        return;
+                    }
 
-                    policy.AddWindow(window);
-
-                    if (workerFaulted)
+                    if (record.DecisionKind == LocalizationDecisionKind.Publish)
                     {
-                        throw new InvalidOperationException(workerException?.Message ?? "Localization worker faulted.");
+                        episodesCompleted++;
+                        var evt = BuildEvent(
+                            "episode_completed",
+                            runId,
+                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
+                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
+                            reason: null,
+                            requestedDurationSeconds: null,
+                            result: record.Result.PublishedCoords,
+                            record);
+                        WriteEvent(writer, writeLock, evt);
+                        return;
+                    }
+
+                    if (record.DecisionKind == LocalizationDecisionKind.Refuse)
+                    {
+                        episodesRefused++;
+                        var evt = BuildEvent(
+                            "episode_refused",
+                            runId,
+                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
+                            ResolveWindowEndUtc(record.EpisodeId, currentWindowEndUtc, lastRequestByEpisode),
+                            reason: record.ReasonCode.ToString(),
+                            requestedDurationSeconds: null,
+                            result: null,
+                            record);
+                        WriteEvent(writer, writeLock, evt);
+                    }
+                };
+
+                try
+                {
+                    foreach (string line in File.ReadLines(options.InputPath))
+                    {
+                        if (string.IsNullOrWhiteSpace(line))
+                        {
+                            continue;
+                        }
+
+                        RtWindowSummary window = ParseWindowSummary(line);
+                        windowsProcessed++;
+                        currentWindowEndUtc = window.WindowEndUtc;
+
+                        var snapshot = BuildSnapshot(window, windowsProcessed);
+                        bool triggered = triggerPolicy.ShouldTrigger(snapshot);
+                        var triggerEvent = new LocalizationReplayEvent
+                        {
+                            EventTimeUtc = window.WindowEndUtc,
+                            EventType = "trigger_evaluated",
+                            RunId = runId,
+                            WindowEndUtc = window.WindowEndUtc,
+                            Triggered = triggered,
+                            RtState = window.RtState
+                        };
+                        WriteEvent(writer, writeLock, triggerEvent);
+
+                        policy.AddWindow(window);
+
+                        if (workerFaulted)
+                        {
+                            throw new InvalidOperationException(workerException?.Message ?? "Localization worker faulted.");
+                        }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Failed to process localization replay: {ex.Message}");
-                return 1;
-            }
-            finally
-            {
-                WaitForPendingRequests(ref pendingRequests, workerFaulted);
-                cts.Cancel();
-                AwaitWorker(workerTask);
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to process localization replay: {ex.Message}");
+                    return 1;
+                }
+                finally
+                {
+                    WaitForPendingRequests(ref pendingRequests, workerFaulted);
+                    cts.Cancel();
+                    AwaitWorker(workerTask);
+                }
             }
 
             Console.WriteLine($"windows_processed={windowsProcessed}, episodes_started={episodesStarted}, episodes_completed={episodesCompleted}, episodes_refused={episodesRefused}");
@@ -365,12 +367,12 @@ namespace Listen_N
                 0,
                 0,
                 window.QualityScalar,
-                changeDetected: false,
-                holdLike: false,
-                degradedLike: false,
-                schemaVersion: 0,
-                schemaHash: string.Empty,
-                diagnostics: null);
+                false,
+                false,
+                false,
+                0,
+                string.Empty,
+                null);
         }
 
         private static RtWindowSummary ParseWindowSummary(string line)
