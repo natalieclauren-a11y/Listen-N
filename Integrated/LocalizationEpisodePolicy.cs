@@ -20,7 +20,7 @@ namespace Integrated.Runtime
         public required Guid EpisodeId { get; init; }
         public required bool IsProbe { get; init; }
         public bool IsManual { get; init; }
-        public long Sequence { get; init; } = DateTimeOffset.UtcNow.UtcTicks;
+        public long Sequence { get; init; }
         public CancellationToken CancellationToken { get; init; } = CancellationToken.None;
         public required LocalizationRow Row { get; init; }
         public required DateTimeOffset EpisodeStartUtc { get; init; }
@@ -192,6 +192,7 @@ namespace Integrated.Runtime
         public event Action<LocalizationDecisionRecord>? OnDecisionRecord;
 
         public bool AutoModeEnabled { get; set; } = true;
+        public Func<DateTimeOffset> NowProvider { get; set; } = () => DateTimeOffset.UtcNow;
 
         public bool IsEpisodeActive => _episodeActive;
         public double AccumulatedCountsTotal => _accumTotalCounts;
@@ -557,7 +558,7 @@ namespace Integrated.Runtime
         {
             if (!_episodeActive)
             {
-                StartManualEpisode(DateTimeOffset.UtcNow, _lastWindowSummary);
+                StartManualEpisode(NowProvider(), _lastWindowSummary);
             }
 
             var request = BuildRequest(isProbe: true, isManual: true);
@@ -737,7 +738,7 @@ namespace Integrated.Runtime
             {
                 Code = code,
                 EpisodeId = episodeId,
-                TimestampUtc = DateTimeOffset.UtcNow,
+                TimestampUtc = NowProvider(),
                 Message = message
             });
         }
@@ -847,7 +848,7 @@ namespace Integrated.Runtime
             return new LocalizationDecisionRecord
             {
                 RunId = RunId,
-                TimestampUtc = DateTime.UtcNow,
+                TimestampUtc = NowProvider().UtcDateTime,
                 DecisionKind = kind,
                 ReasonCode = reason,
                 EpisodeId = _episodeId,
