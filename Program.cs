@@ -15,6 +15,15 @@ namespace Listen_N
                 return;
             }
 
+            if (args.Length > 0
+                && (string.Equals(args[0], "localize", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[0], "localize_replay", StringComparison.OrdinalIgnoreCase)))
+            {
+                int exitCode = LocalizationReplayRunner.RunCli(args.Skip(1).ToArray());
+                Environment.Exit(exitCode);
+                return;
+            }
+
             // To customize application configuration such as set high DPI settings or default font,
             // see https://aka.ms/applicationconfiguration.
             Application.EnableVisualStyles();
