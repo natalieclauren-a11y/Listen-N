@@ -175,6 +175,7 @@ namespace Listen_N
             int requestsRefused = 0;
             int pendingRequests = 0;
             bool workerFaulted = false;
+            bool replayFailed = false;
             Exception? workerException = null;
             DateTimeOffset? currentWindowEndUtc = null;
             string? currentRtState = null;
@@ -313,13 +314,13 @@ namespace Listen_N
                 finally
                 {
                     bool drained = WaitForPendingRequests(ref pendingRequests, workerFaulted, workerResults, workerSignal, policy, pendingRequestIds, requestsById, writer, ref eventIndex, runId, requestsBySequence, ref requestsRefused);
-                    cts.Cancel();
-                    AwaitWorker(workerTask);
                     if (!drained)
                     {
                         Console.Error.WriteLine("Localization replay ended with undrained ML requests.");
-                        return 1;
+                        replayFailed = true;
                     }
+                    cts.Cancel();
+                    AwaitWorker(workerTask);
                 }
             }
 
@@ -328,7 +329,7 @@ namespace Listen_N
             WriteSummary(summaryPath, runId, windowsProcessed, eventIndex, requestsIssued, requestsRefused, resultsPublished, pendingRequests, eventsHash);
 
             Console.WriteLine($"windows_processed={windowsProcessed}, requests={requestsIssued}, refused={requestsRefused}, results={resultsPublished}");
-            return workerFaulted ? 1 : 0;
+            return workerFaulted || replayFailed ? 1 : 0;
         }
 
         private static LocalizationReplayDependencies LoadDependencies(string? configPath, string? modelsDirectory)
