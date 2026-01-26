@@ -62,20 +62,114 @@ def filtered_manifest(df: pd.DataFrame) -> pd.DataFrame:
 def discover_run_file(data_root: str | pathlib.Path, run_id: str) -> pathlib.Path:
     """Discover a run file in the data root."""
     data_root = pathlib.Path(data_root)
-    candidates = list(data_root.glob(f"{run_id}*"))
+    run_dir = data_root / run_id
+    candidate_names = [
+        "rt_windows.ndjson",
+        "windows.ndjson",
+        "rt_windows_selected.ndjson",
+        "windows.jsonl",
+        "rt_windows.jsonl",
+        "windows.csv",
+        "rt_windows.csv",
+    ]
+    allowed_exts = {".ndjson", ".jsonl", ".csv"}
+
+    def collect_candidates(paths: Iterable[pathlib.Path]) -> list[pathlib.Path]:
+        matches: list[pathlib.Path] = []
+        for candidate in paths:
+            if not candidate.is_file():
+                continue
+            name = candidate.name.lower()
+            ext = candidate.suffix.lower()
+            if ext not in allowed_exts:
+                continue
+            if name in candidate_names or ("window" in name):
+                matches.append(candidate)
+        return matches
+
+    search_dirs = [run_dir] if run_dir.is_dir() else [data_root]
+    candidates = []
+    for search_dir in search_dirs:
+        direct = collect_candidates(search_dir.iterdir())
+        if direct:
+            candidates.extend(direct)
+
+    if not candidates and run_dir.is_dir():
+        candidates = collect_candidates(run_dir.rglob("*"))
+    elif not candidates:
+        run_id_lower = run_id.lower()
+        def run_id_match(path: pathlib.Path) -> bool:
+            if run_id_lower in path.name.lower():
+                return True
+            return any(run_id_lower == part.lower() for part in path.parts)
+        candidates = [
+            candidate
+            for candidate in collect_candidates(data_root.rglob("*"))
+            if run_id_match(candidate)
+        ]
+
     if not candidates:
-        candidates = list((data_root / run_id).glob("*.csv")) + list((data_root / run_id).glob("*.ndjson"))
-    for candidate in candidates:
-        if candidate.suffix.lower() in {".csv", ".ndjson", ".jsonl"}:
-            return candidate
-    raise FileNotFoundError(f"No run data file found for run_id={run_id} under {data_root}")
+        raise FileNotFoundError(f"No run data file found for run_id={run_id} under {data_root}")
+
+    def candidate_key(path: pathlib.Path) -> tuple[int, int, int, str]:
+        name = path.name.lower()
+        ext = path.suffix.lower()
+        ext_priority = 0 if ext in {".ndjson", ".jsonl"} else 1
+        exact_priority = 0 if name in candidate_names else 1
+        size = path.stat().st_size
+        return (ext_priority, exact_priority, -size, path.as_posix())
+
+    return sorted(candidates, key=candidate_key)[0]
 
 
-def load_window_data(path: pathlib.Path) -> pd.DataFrame:
-    """Load window data from CSV or NDJSON."""
-    if path.suffix.lower() in {".ndjson", ".jsonl"}:
-        return pd.read_json(path, lines=True)
-    return pd.read_csv(path)
+def load_window_data(path: str | pathlib.Path) -> pd.DataFrame:
+    """Load window data from CSV or JSON variants."""
+    path = pathlib.Path(path)
+    ext = path.suffix.lower()
+    if not path.exists():
+        raise FileNotFoundError(f"Window data file not found: {path}")
+    size = path.stat().st_size
+    if size == 0:
+        raise ValueError(f"Window data file is empty: {path}")
+
+    def preview_lines(limit: int = 5, max_chars: int = 200) -> list[str]:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return [line[:max_chars] for line in lines[:limit]]
+
+    def json_error_message(exc: Exception) -> ValueError:
+        preview = preview_lines()
+        preview_text = "\n".join(preview) if preview else "<no non-empty lines>"
+        message = (
+            f"Failed to parse window data JSON file: {path} (size {size} bytes). "
+            f"{exc.__class__.__name__}: {exc}. Preview:\n{preview_text}"
+        )
+        return ValueError(message)
+
+    if ext in {".ndjson", ".jsonl"}:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            raise ValueError(f"Window data file is empty: {path}")
+        try:
+            return pd.read_json("\n".join(lines), lines=True)
+        except ValueError as exc:
+            raise json_error_message(exc) from exc
+    if ext == ".json":
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        if not text.strip():
+            raise ValueError(f"Window data file is empty: {path}")
+        try:
+            filtered_lines = "\n".join([line for line in text.splitlines() if line.strip()])
+            return pd.read_json(filtered_lines, lines=True)
+        except ValueError:
+            try:
+                return pd.read_json(text, lines=False)
+            except ValueError as exc:
+                raise json_error_message(exc) from exc
+    if ext == ".csv":
+        return pd.read_csv(path)
+    raise ValueError(f"Unsupported window data file extension: {path.suffix}")
 
 
 def select_gate(df: pd.DataFrame) -> pd.DataFrame:
