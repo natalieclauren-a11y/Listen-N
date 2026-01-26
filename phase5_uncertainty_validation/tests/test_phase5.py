@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from phase5_uncertainty_validation import io
 from phase5_uncertainty_validation import metrics
@@ -112,3 +113,35 @@ def test_reduced_count_subsampling_preserves_mean():
     )
     reduced = metrics.reduced_count_runs([run], 0.5, rng)[0]
     assert abs(reduced.windows["m1"].mean() - windows["m1"].mean()) < 0.5
+
+
+def test_discover_run_file_prefers_largest_ndjson(tmp_path):
+    run_dir = tmp_path / "run-1"
+    run_dir.mkdir()
+    small = run_dir / "windows.ndjson"
+    large = run_dir / "rt_windows.ndjson"
+    small.write_text('{"m1":1}\n', encoding="utf-8")
+    large.write_text('{"m1":1}\n{"m1":2}\n', encoding="utf-8")
+    chosen = io.discover_run_file(tmp_path, "run-1")
+    assert chosen == large
+
+
+def test_load_window_data_ndjson_with_blank_lines(tmp_path):
+    path = tmp_path / "windows.ndjson"
+    path.write_text('\n{"m1":1}\n\n{"m1":2}\n', encoding="utf-8")
+    df = io.load_window_data(path)
+    assert df["m1"].tolist() == [1, 2]
+
+
+def test_load_window_data_json_array_fallback(tmp_path):
+    path = tmp_path / "windows.json"
+    path.write_text('[{"m1":1},{"m1":2}]', encoding="utf-8")
+    df = io.load_window_data(path)
+    assert df["m1"].tolist() == [1, 2]
+
+
+def test_load_window_data_empty_file(tmp_path):
+    path = tmp_path / "windows.ndjson"
+    path.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="Window data file is empty"):
+        io.load_window_data(path)

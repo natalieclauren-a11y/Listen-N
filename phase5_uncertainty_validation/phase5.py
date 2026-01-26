@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     validate_parser = subparsers.add_parser("validate-inputs", help="Validate input files")
     validate_parser.add_argument("--manifest", required=True)
     validate_parser.add_argument("--data-root", required=True)
+    validate_parser.add_argument("--min-runs-per-group", type=int, default=3)
+    validate_parser.add_argument("--strict", action="store_true", help="Fail on any invalid run")
 
     return parser.parse_args()
 
@@ -51,24 +53,75 @@ def ensure_outdirs(outdir: pathlib.Path) -> dict[str, pathlib.Path]:
     return paths
 
 
-def validate_inputs(manifest_path: str, data_root: str) -> None:
+def validate_inputs(manifest_path: str, data_root: str, min_runs_per_group: int, strict: bool) -> None:
     df = io.read_manifest(manifest_path)
     io.validate_manifest(df)
     df = io.filtered_manifest(df)
+    failures: list[dict[str, str]] = []
+    ok_runs = 0
+    log_paths_printed = 0
+    group_counts: dict[str, int] = {str(group_id): 0 for group_id in df["covariance_group_id"].unique()}
+
     for _, row in df.iterrows():
         run_id = str(row["run_id"])
+        group_id = str(row["covariance_group_id"])
         data_path = row["data_path"] if "data_path" in row else None
-        path = pathlib.Path(data_path) if isinstance(data_path, str) and data_path else None
-        if path is None:
-            path = io.discover_run_file(data_root, run_id)
-        data = io.load_window_data(path)
-        data = io.select_gate(data)
-        required = {"m1", "m2", "m3"}
-        missing = required - set(data.columns)
-        if missing:
-            raise ValueError(f"Run {run_id} missing columns: {sorted(missing)}")
-        _ = io.cov_columns(data)
-    print("Input validation succeeded")
+        path: pathlib.Path | None = None
+        try:
+            path = pathlib.Path(data_path) if isinstance(data_path, str) and data_path else None
+            if path is None:
+                path = io.discover_run_file(data_root, run_id)
+            if log_paths_printed < 3:
+                print(f"validate-inputs: run {run_id} -> {path}")
+                log_paths_printed += 1
+            data = io.load_window_data(path)
+            data = io.select_gate(data)
+            required = {"m1", "m2", "m3"}
+            missing = required - set(data.columns)
+            if missing:
+                raise ValueError(f"Run {run_id} missing columns: {sorted(missing)}")
+            _ = io.cov_columns(data)
+            ok_runs += 1
+            group_counts[group_id] = group_counts.get(group_id, 0) + 1
+        except Exception as exc:  # noqa: BLE001
+            failures.append({
+                "run_id": run_id,
+                "file_path": str(path) if path is not None else "",
+                "exception": exc.__class__.__name__,
+                "message": str(exc),
+            })
+
+    total_runs = ok_runs + len(failures)
+    failure_rate = (len(failures) / total_runs) if total_runs else 0.0
+    log_dir = pathlib.Path(__file__).resolve().parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    failure_log_path = log_dir / "validate_inputs_failures.csv"
+
+    if failures:
+        pd.DataFrame(failures).to_csv(failure_log_path, index=False)
+        print(f"validate-inputs: {ok_runs} ok, {len(failures)} failed. See {failure_log_path}.")
+    else:
+        print("Input validation succeeded")
+
+    insufficient_groups = [
+        group_id for group_id, count in group_counts.items()
+        if count < min_runs_per_group
+    ]
+
+    if strict and failures:
+        raise SystemExit("validate-inputs failed in strict mode. See failure log for details.")
+    if insufficient_groups:
+        raise SystemExit(
+            "validate-inputs failed: groups below minimum runs after exclusions: "
+            f"{sorted(insufficient_groups)} (min_runs_per_group={min_runs_per_group})."
+        )
+    if failure_rate > 0.10:
+        raise SystemExit(
+            f"validate-inputs failed: failure rate {failure_rate:.1%} exceeds 10%. "
+            f"See {failure_log_path}."
+        )
+    if failures:
+        print(f"validate-inputs completed with warnings (failure rate {failure_rate:.1%}).")
 
 
 def run_analysis(args: argparse.Namespace) -> None:
@@ -298,7 +351,7 @@ def run_analysis(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     if args.command == "validate-inputs":
-        validate_inputs(args.manifest, args.data_root)
+        validate_inputs(args.manifest, args.data_root, args.min_runs_per_group, args.strict)
     elif args.command == "run":
         run_analysis(args)
     else:
