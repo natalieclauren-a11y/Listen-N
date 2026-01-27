@@ -7,8 +7,10 @@ import argparse
 import glob
 import math
 import os
+import re
+import warnings
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -73,59 +75,110 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overlay jittered per-run median points",
     )
+    parser.add_argument(
+        "--debug-read-lmx",
+        action="store_true",
+        help="Print LMX parsing diagnostics and timestamp summary",
+    )
     return parser.parse_args()
 
 
-def read_lmx_timestamps(path: str) -> LmxParseResult:
+def read_lmx_timestamps(path: str, debug: bool = False) -> LmxParseResult:
     """Read LMX timestamps as float seconds.
 
-    Attempts several layouts:
-    1) Pure float64 seconds, no header.
-    2) Pure int64 ticks, no header, with tick periods in a plausible set.
-    3) Same as (1) or (2) but with a fixed header offset (256, 512, 1024 bytes).
-
-    If none match, raises an informative error describing expectations.
+    Mirrors converter_v6.py: parse ASCII header then binary 8-byte records.
     """
 
+    header_max = 200
+    t_step: Optional[int] = None
+    nlines: Optional[int] = None
+    total_counts: Optional[int] = None
+
     with open(path, "rb") as handle:
-        raw = handle.read()
+        for _ in range(header_max):
+            line = handle.readline()
+            if not line:
+                break
+            text = line.decode(errors="ignore").strip()
+            if "BinaryDataClockTickLength" in text:
+                t_step = _parse_first_int(text)
+            elif "BinaryDataFollows" in text:
+                nlines = _parse_first_int(text)
+            elif "InternalScaler" in text:
+                total_counts = _parse_first_int(text)
+            if t_step is not None and nlines is not None and total_counts is not None:
+                break
 
-    if len(raw) < 16:
-        raise ValueError(f"LMX file too small to parse: {path}")
+    if t_step is None or nlines is None or total_counts is None:
+        raise ValueError(
+            "Unable to parse LMX header. Expected ASCII header containing "
+            "'BinaryDataClockTickLength', 'BinaryDataFollows', and 'InternalScaler'."
+        )
 
-    candidate_offsets = [0, 256, 512, 1024]
-    tick_periods = [1e-9, 2e-9, 5e-9, 1e-8, 1e-7, 1e-6]
+    timestamps: List[float] = []
+    add = 0.0
+    read_events = 0
+    channel_bitmask = list(range(1, 16))
 
-    for offset in candidate_offsets:
-        if offset >= len(raw):
-            continue
-        payload = raw[offset:]
-        if len(payload) % 8 != 0:
-            continue
+    with open(path, "rb") as handle:
+        for _ in range(nlines):
+            if not handle.readline():
+                break
 
-        float_vals = np.frombuffer(payload, dtype=np.float64)
-        if _looks_like_seconds(float_vals):
-            timestamps = _prepare_timestamps(float_vals)
-            return LmxParseResult(
-                timestamps,
-                f"float64 seconds, offset {offset} bytes",
-            )
+        while True:
+            chunk = handle.read(8)
+            if len(chunk) < 8:
+                break
+            l_bytes = chunk[:4]
+            l2 = int.from_bytes(chunk[4:], byteorder="little", signed=False)
+            read_events += 1
 
-        int_vals = np.frombuffer(payload, dtype=np.int64)
-        for period in tick_periods:
-            seconds = int_vals.astype(np.float64) * period
-            if _looks_like_seconds(seconds):
-                timestamps = _prepare_timestamps(seconds)
-                return LmxParseResult(
-                    timestamps,
-                    f"int64 ticks (period {period:g}s), offset {offset} bytes",
-                )
+            if l_bytes == b"\x00\x00\x00\x00":
+                marker = handle.read(8)
+                if len(marker) < 8:
+                    break
+                l_marker = marker[:4]
+                l2_marker = int.from_bytes(marker[4:], byteorder="little", signed=False)
+                read_events += 1
+                t = l2_marker * t_step * 1e-9 + add
+                if l_marker == b"\x01\x00\x00\x00":
+                    add = float(t)
+                elif l_marker == b"\xff\xff\xff\xff":
+                    break
+                if total_counts is not None and read_events > total_counts + 2:
+                    break
+                continue
 
-    raise ValueError(
-        "Unable to parse LMX timestamps. Expected 64-bit float seconds or 64-bit "
-        "integer ticks with a simple header (0, 256, 512, or 1024 bytes). "
-        "If your LMX layout differs, update read_lmx_timestamps() to match your "
-        "binary structure (e.g., adjust header offsets, data type, or tick period)."
+            l_val = int.from_bytes(l_bytes, byteorder="little", signed=False)
+            t = l2 * t_step * 1e-9 + add
+            if _check_channels(_channels_present(l_val), channel_bitmask):
+                timestamps.append(float(t))
+
+            if total_counts is not None and read_events > total_counts + 2:
+                break
+
+    timestamps_arr = np.array(timestamps, dtype=np.float64)
+    if timestamps_arr.size > 1 and not np.all(np.diff(timestamps_arr) > 0):
+        warnings.warn(
+            "LMX timestamps were not strictly increasing; sorting and uniquing.",
+            RuntimeWarning,
+        )
+        timestamps_arr = np.unique(np.sort(timestamps_arr))
+
+    if debug:
+        print(f"LMX header: t_step={t_step}, nlines={nlines}, total_counts={total_counts}")
+        print(f"Extracted timestamps: {timestamps_arr.size}")
+        print(f"First 5: {timestamps_arr[:5]}")
+        print(f"Last 5: {timestamps_arr[-5:]}")
+        if timestamps_arr.size > 1:
+            diffs = np.diff(timestamps_arr)
+            print(f"min dt={float(diffs.min())} max dt={float(diffs.max())}")
+        else:
+            print("min dt=nan max dt=nan")
+
+    return LmxParseResult(
+        timestamps_arr,
+        f"LMX binary (t_step={t_step}, header_lines={nlines})",
     )
 
 
@@ -153,6 +206,21 @@ def _prepare_timestamps(values: np.ndarray) -> np.ndarray:
     if not np.all(np.diff(timestamps) >= 0):
         timestamps = np.sort(timestamps)
     return timestamps
+
+
+def _parse_first_int(text: str) -> int:
+    match = re.search(r"(-?\d+)", text)
+    if not match:
+        raise ValueError(f"Unable to parse integer from header line: {text}")
+    return int(match.group(1))
+
+
+def _channels_present(mask: int) -> List[int]:
+    return [idx + 1 for idx in range(32) if (mask >> idx) & 1]
+
+
+def _check_channels(channels_present: Iterable[int], channel_bitmask: Sequence[int]) -> bool:
+    return any(channel in channel_bitmask for channel in channels_present)
 
 
 def compute_window_metrics(
@@ -332,7 +400,7 @@ def main() -> None:
     estimates_per_file: List[int] = []
 
     for path in files:
-        result = read_lmx_timestamps(path)
+        result = read_lmx_timestamps(path, debug=args.debug_read_lmx)
         t = result.timestamps_s
         if t.size == 0:
             print(f"Skipping {os.path.basename(path)} (no timestamps)")
