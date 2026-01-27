@@ -94,25 +94,43 @@ def read_lmx_timestamps(path: str, debug: bool = False) -> LmxParseResult:
     nlines: Optional[int] = None
     total_counts: Optional[int] = None
 
+    header_lines: List[str] = []
     with open(path, "rb") as handle:
-        for _ in range(header_max):
+        for i in range(header_max):
             line = handle.readline()
             if not line:
                 break
-            text = line.decode(errors="ignore").strip()
-            if "BinaryDataClockTickLength" in text:
-                t_step = _parse_first_int(text)
-            elif "BinaryDataFollows" in text:
-                nlines = _parse_first_int(text)
-            elif "InternalScaler" in text:
-                total_counts = _parse_first_int(text)
+            decoded = line.decode(errors="ignore")
+            header_lines.append(decoded.rstrip("\n"))
+            if "BinaryDataClockTickLength" in decoded:
+                t_step = int(decoded.split()[-2])
+                if debug:
+                    print(f"LMX header ticklength line: {decoded.rstrip()}")
+            elif "BinaryDataFollows" in decoded:
+                nlines = i + 1
+                if debug:
+                    print(f"LMX header binarydatafollows line: {decoded.rstrip()}")
+            elif "InternalScaler" in decoded:
+                total_counts = int(decoded.split()[-1])
+                if debug:
+                    print(f"LMX header internalscaler line: {decoded.rstrip()}")
             if t_step is not None and nlines is not None and total_counts is not None:
                 break
 
     if t_step is None or nlines is None or total_counts is None:
+        missing_fields = []
+        if t_step is None:
+            missing_fields.append("BinaryDataClockTickLength")
+        if nlines is None:
+            missing_fields.append("BinaryDataFollows")
+        if total_counts is None:
+            missing_fields.append("InternalScaler")
+        recent_lines = "\n".join(header_lines[-10:])
         raise ValueError(
-            "Unable to parse LMX header. Expected ASCII header containing "
-            "'BinaryDataClockTickLength', 'BinaryDataFollows', and 'InternalScaler'."
+            "Unable to parse LMX header. Missing fields: "
+            f"{', '.join(missing_fields)}. "
+            "Last header lines:\n"
+            f"{recent_lines}"
         )
 
     timestamps: List[float] = []
