@@ -33,6 +33,8 @@ class ControllerResult:
     w_s: np.ndarray
     state: List[str]
     rate_cps: np.ndarray
+    rate_smooth_cps: np.ndarray
+    w_des_s: np.ndarray
     change_stat: np.ndarray
     ph_alarm: np.ndarray
     n_events: np.ndarray
@@ -84,10 +86,28 @@ def parse_args() -> argparse.Namespace:
         help="Controller update cadence in seconds",
     )
     parser.add_argument(
+        "--rate-smooth-tau-s",
+        type=float,
+        default=2.0,
+        help="Exponential smoothing time constant for rate proxy",
+    )
+    parser.add_argument(
         "--w-min-s", type=float, default=1.0, help="Minimum window length"
     )
     parser.add_argument(
         "--w-max-s", type=float, default=30.0, help="Maximum window length"
+    )
+    parser.add_argument(
+        "--w-contract-max-per-step",
+        type=float,
+        default=1.0,
+        help="Maximum window contraction per controller step in seconds",
+    )
+    parser.add_argument(
+        "--w-expand-max-per-step",
+        type=float,
+        default=2.0,
+        help="Maximum window expansion per controller step in seconds",
     )
     parser.add_argument(
         "--warmup-s", type=float, default=20.0, help="Warmup duration in seconds"
@@ -121,6 +141,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Minimum events required to compute stats",
+    )
+    parser.add_argument(
+        "--show-ph-markers",
+        action="store_true",
+        default=False,
+        help="Show Page-Hinkley alarm markers",
     )
     return parser.parse_args()
 
@@ -247,6 +273,9 @@ def run_controller(
     step_s: float,
     w_min_s: float,
     w_max_s: float,
+    rate_smooth_tau_s: float,
+    w_contract_max_per_step: float,
+    w_expand_max_per_step: float,
     warmup_s: float,
     debounce_s: float,
     ph_threshold: float,
@@ -262,6 +291,8 @@ def run_controller(
             w_s=np.array([]),
             state=[],
             rate_cps=np.array([]),
+            rate_smooth_cps=np.array([]),
+            w_des_s=np.array([]),
             change_stat=np.array([]),
             ph_alarm=np.array([], dtype=bool),
             n_events=np.array([], dtype=int),
@@ -274,6 +305,8 @@ def run_controller(
 
     w_s = np.zeros(step_times.size, dtype=float)
     rate_cps = np.zeros(step_times.size, dtype=float)
+    rate_smooth_cps = np.zeros(step_times.size, dtype=float)
+    w_des_s = np.zeros(step_times.size, dtype=float)
     change_stat = np.zeros(step_times.size, dtype=float)
     ph_alarm = np.zeros(step_times.size, dtype=bool)
     n_events = np.zeros(step_times.size, dtype=int)
@@ -288,6 +321,8 @@ def run_controller(
 
     current_w = min(max(5.0, w_min_s), w_max_s)
     current_state = "Warmup"
+    rate_smooth_prev = 0.0
+    n_target = (1.0 / target_rel_unc) ** 2
 
     for idx, t_end in enumerate(step_times):
         t_start = max(0.0, t_end - current_w)
@@ -297,6 +332,17 @@ def run_controller(
         n_events[idx] = count
         rate = count / current_w if current_w > 0 else 0.0
         rate_cps[idx] = rate
+        if idx == 0:
+            rate_smooth = rate
+        else:
+            alpha = 1.0 - np.exp(-step_s / rate_smooth_tau_s)
+            rate_smooth = (1.0 - alpha) * rate_smooth_prev + alpha * rate
+        rate_smooth_prev = rate_smooth
+        rate_smooth_cps[idx] = rate_smooth
+
+        w_des = n_target / max(rate_smooth, 1e-9)
+        w_des = float(np.clip(w_des, w_min_s, w_max_s))
+        w_des_s[idx] = w_des
 
         log_rate = np.log(rate + 1e-6)
         mean, cumulative, min_cumulative, stat, alarm, n_ph = page_hinkley_update(
@@ -320,6 +366,7 @@ def run_controller(
         alarm_cleared = (not alarm) and alarm_clear_start is not None and (
             t_end - alarm_clear_start >= debounce_s
         )
+        lowrate_condition = count < min_events or rate < (min_events / w_max_s)
 
         if t_end < warmup_s:
             current_state = "Warmup"
@@ -337,21 +384,18 @@ def run_controller(
                     if count >= min_events and alarm_cleared:
                         current_state = "Track"
                 else:
-                    if count < min_events:
+                    if lowrate_condition:
                         current_state = "LowRate"
                     else:
                         current_state = "Track"
 
-        rel_unc = 1.0 / np.sqrt(max(count, 1))
-
-        # FSM-driven adaptation with simple smoothing.
+        # Desired window controller with asymmetric rate limits.
         if current_state == "Track":
-            if rel_unc < target_rel_unc * 0.8 and count >= min_events:
-                current_w = max(w_min_s, current_w - step_s)
-            elif rel_unc > target_rel_unc:
-                current_w = min(w_max_s, current_w + step_s)
+            dw = w_des - current_w
+            dw = float(np.clip(dw, -w_contract_max_per_step, w_expand_max_per_step))
+            current_w = float(np.clip(current_w + dw, w_min_s, w_max_s))
         elif current_state in {"Degraded", "LowRate"}:
-            current_w = min(w_max_s, current_w + 2.0 * step_s)
+            current_w = min(w_max_s, current_w + w_expand_max_per_step)
         elif current_state == "Hold":
             current_w = current_w
         elif current_state == "Warmup":
@@ -367,6 +411,8 @@ def run_controller(
         w_s=w_s,
         state=states,
         rate_cps=rate_cps,
+        rate_smooth_cps=rate_smooth_cps,
+        w_des_s=w_des_s,
         change_stat=change_stat,
         ph_alarm=ph_alarm,
         n_events=n_events,
@@ -393,6 +439,7 @@ def plot_figure(
     out_png: str,
     out_pdf: Optional[str],
     title: Optional[str],
+    show_ph_markers: bool,
 ) -> None:
     if result.t_end_s.size == 0:
         raise ValueError("No events available for plotting")
@@ -425,7 +472,7 @@ def plot_figure(
     ax_w.set_ylabel("Window length (s)")
 
     ax_r.plot(t_plot, result.rate_cps, color=OKABE_ITO["black"], lw=1.5)
-    if np.any(result.ph_alarm):
+    if show_ph_markers and np.any(result.ph_alarm):
         ax_r.scatter(
             t_plot[result.ph_alarm],
             result.rate_cps[result.ph_alarm],
@@ -474,6 +521,8 @@ def write_csv(result: ControllerResult, out_csv: str) -> None:
                 "w_s",
                 "state",
                 "rate_cps",
+                "rate_smooth_cps",
+                "w_des_s",
                 "change_stat",
                 "ph_alarm",
                 "n_events",
@@ -487,6 +536,8 @@ def write_csv(result: ControllerResult, out_csv: str) -> None:
                     f"{result.w_s[idx]:.6f}",
                     state,
                     f"{result.rate_cps[idx]:.6f}",
+                    f"{result.rate_smooth_cps[idx]:.6f}",
+                    f"{result.w_des_s[idx]:.6f}",
                     f"{result.change_stat[idx]:.6f}",
                     str(bool(result.ph_alarm[idx])),
                     str(int(result.n_events[idx])),
@@ -539,6 +590,9 @@ def main() -> None:
         step_s=args.step_s,
         w_min_s=args.w_min_s,
         w_max_s=args.w_max_s,
+        rate_smooth_tau_s=args.rate_smooth_tau_s,
+        w_contract_max_per_step=args.w_contract_max_per_step,
+        w_expand_max_per_step=args.w_expand_max_per_step,
         warmup_s=args.warmup_s,
         debounce_s=args.debounce_s,
         ph_threshold=args.ph_threshold,
@@ -549,7 +603,7 @@ def main() -> None:
     )
 
     out_png, out_pdf, out_csv = _resolve_outputs(args.out)
-    plot_figure(result, out_png, out_pdf, args.title)
+    plot_figure(result, out_png, out_pdf, args.title, args.show_ph_markers)
     write_csv(result, out_csv)
 
     print(f"Saved figure: {out_png}")
