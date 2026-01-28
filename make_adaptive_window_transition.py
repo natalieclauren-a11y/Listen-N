@@ -39,6 +39,7 @@ class ControllerResult:
     change_stat: np.ndarray
     ph_alarm: np.ndarray
     n_events: np.ndarray
+    episode_active: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class ScheduleRow:
     t_end_s: float
     state: str
     w_s: float
+    episode_active: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -294,11 +296,16 @@ def _load_schedule_csv(
                 t_end = float(row["t_end_s"])
                 state = str(row["state"]).strip()
                 w_s = float(row["w_s"])
+                episode_active = int(row.get("episode_active", "0"))
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     f"Invalid value in schedule CSV row {row_num}: {exc}"
                 ) from exc
 
+            if episode_active not in {0, 1}:
+                raise ValueError(
+                    f"Schedule row {row_num} has invalid episode_active: {episode_active}"
+                )
             if t_start >= t_end:
                 raise ValueError(
                     f"Schedule row {row_num} has t_start_s >= t_end_s"
@@ -320,6 +327,7 @@ def _load_schedule_csv(
                     t_end_s=t_end,
                     state=state,
                     w_s=w_s,
+                    episode_active=bool(episode_active),
                 )
             )
 
@@ -376,6 +384,7 @@ def run_controller(
             change_stat=np.array([]),
             ph_alarm=np.array([], dtype=bool),
             n_events=np.array([], dtype=int),
+            episode_active=np.array([], dtype=bool),
         )
 
     duration = float(timestamps[-1])
@@ -390,6 +399,7 @@ def run_controller(
     change_stat = np.zeros(step_times.size, dtype=float)
     ph_alarm = np.zeros(step_times.size, dtype=bool)
     n_events = np.zeros(step_times.size, dtype=int)
+    episode_active = np.zeros(step_times.size, dtype=bool)
     states: List[str] = []
 
     mean = 0.0
@@ -424,6 +434,7 @@ def run_controller(
                     )
             current_state = row.state
             current_w = row.w_s
+            episode_active[idx] = row.episode_active
         t_start = max(0.0, t_end - current_w)
         left = np.searchsorted(timestamps, t_start, side="left")
         right = np.searchsorted(timestamps, t_end, side="left")
@@ -521,6 +532,7 @@ def run_controller(
         change_stat=change_stat,
         ph_alarm=ph_alarm,
         n_events=n_events,
+        episode_active=episode_active,
     )
 
 
@@ -536,6 +548,22 @@ def _state_segments(times: np.ndarray, states: Sequence[str]) -> List[Tuple[floa
             start = t
             current = s
     segments.append((start, times[-1], current))
+    return segments
+
+
+def _flag_segments(times: np.ndarray, flags: np.ndarray) -> List[Tuple[float, float]]:
+    if times.size == 0 or flags.size == 0:
+        return []
+    segments: List[Tuple[float, float]] = []
+    start: Optional[float] = None
+    for t, flag in zip(times, flags):
+        if flag and start is None:
+            start = t
+        if not flag and start is not None:
+            segments.append((start, t))
+            start = None
+    if start is not None:
+        segments.append((start, times[-1]))
     return segments
 
 
@@ -577,6 +605,8 @@ def plot_figure(
     ax_w.set_ylabel("Window length (s)")
 
     ax_r.plot(t_plot, result.rate_cps, color=OKABE_ITO["black"], lw=1.5)
+    for start, end in _flag_segments(t_end_plot, result.episode_active):
+        ax_r.axvspan(start, end, color=OKABE_ITO["black"], alpha=0.08, lw=0)
     if show_ph_markers and np.any(result.ph_alarm):
         ax_r.scatter(
             t_plot[result.ph_alarm],
@@ -631,6 +661,7 @@ def write_csv(result: ControllerResult, out_csv: str) -> None:
                 "change_stat",
                 "ph_alarm",
                 "n_events",
+                "episode_active",
             ]
         )
         for idx, state in enumerate(result.state):
@@ -646,6 +677,7 @@ def write_csv(result: ControllerResult, out_csv: str) -> None:
                     f"{result.change_stat[idx]:.6f}",
                     str(bool(result.ph_alarm[idx])),
                     str(int(result.n_events[idx])),
+                    str(int(result.episode_active[idx])),
                 ]
             )
 
