@@ -286,9 +286,8 @@ def run_controller(
     alarm_start: Optional[float] = None
     alarm_clear_start: Optional[float] = None
 
-    current_w = w_min_s
+    current_w = min(max(5.0, w_min_s), w_max_s)
     current_state = "Warmup"
-    tg_s = max(tg_ms * 1e-3, 1e-6)
 
     for idx, t_end in enumerate(step_times):
         t_start = max(0.0, t_end - current_w)
@@ -343,21 +342,19 @@ def run_controller(
                     else:
                         current_state = "Track"
 
-        gate_count = max(int(round(current_w / tg_s)), 1)
-        occupancy = min(count / gate_count, 1.0)
-        occ_var = max(occupancy * (1.0 - occupancy) / gate_count, 1e-12)
-        rate_unc = np.sqrt(occ_var) / tg_s
-        rel_unc = rate_unc / max(rate, 1e-6)
+        rel_unc = 1.0 / np.sqrt(max(count, 1))
 
         # FSM-driven adaptation with simple smoothing.
         if current_state == "Track":
-            if rel_unc > target_rel_unc:
-                current_w = min(w_max_s, current_w + step_s)
-            elif rel_unc < target_rel_unc * 0.7 and not alarm and count >= min_events:
+            if rel_unc < target_rel_unc * 0.8 and count >= min_events:
                 current_w = max(w_min_s, current_w - step_s)
-        elif current_state in {"Degraded", "LowRate", "Warmup"}:
-            current_w = min(w_max_s, current_w + step_s)
+            elif rel_unc > target_rel_unc:
+                current_w = min(w_max_s, current_w + step_s)
+        elif current_state in {"Degraded", "LowRate"}:
+            current_w = min(w_max_s, current_w + 2.0 * step_s)
         elif current_state == "Hold":
+            current_w = current_w
+        elif current_state == "Warmup":
             current_w = current_w
 
         w_s[idx] = current_w
@@ -405,7 +402,7 @@ def plot_figure(
     scale = 60.0 if use_minutes else 1.0
     x_label = "Time (min)" if use_minutes else "Time (s)"
 
-    t_plot = result.t_mid_s / scale
+    t_plot = result.t_end_s / scale
     t_end_plot = result.t_end_s / scale
 
     fig, (ax_w, ax_r) = plt.subplots(
@@ -472,6 +469,7 @@ def write_csv(result: ControllerResult, out_csv: str) -> None:
         writer = csv.writer(handle)
         writer.writerow(
             [
+                "t_end_s",
                 "t_mid_s",
                 "w_s",
                 "state",
@@ -484,6 +482,7 @@ def write_csv(result: ControllerResult, out_csv: str) -> None:
         for idx, state in enumerate(result.state):
             writer.writerow(
                 [
+                    f"{result.t_end_s[idx]:.6f}",
                     f"{result.t_mid_s[idx]:.6f}",
                     f"{result.w_s[idx]:.6f}",
                     state,
