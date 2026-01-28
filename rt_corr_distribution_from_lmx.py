@@ -45,7 +45,12 @@ def parse_args() -> argparse.Namespace:
             "Compute distribution of real-time correlation Z-scores across runs."
         )
     )
-    parser.add_argument("--lmx-dir", required=True, help="Directory containing LMX files")
+    parser.add_argument(
+        "--cf-dir", required=True, help="Directory containing Cf-only LMX files"
+    )
+    parser.add_argument(
+        "--berp-dir", required=True, help="Directory containing BeRP-only LMX files"
+    )
     parser.add_argument("--pattern", default="*.lmx", help="Glob pattern for LMX files")
     parser.add_argument("--tg", type=float, default=1e-3, help="Gate width (seconds)")
     parser.add_argument(
@@ -402,11 +407,8 @@ def plot_distribution(
     plt.close(fig)
 
 
-def main() -> None:
-    args = parse_args()
-    print(format_params(args))
-
-    pattern = os.path.join(args.lmx_dir, args.pattern)
+def compute_run_medians(lmx_dir: str, args: argparse.Namespace) -> np.ndarray:
+    pattern = os.path.join(lmx_dir, args.pattern)
     files = sorted(glob.glob(pattern))
     if not files:
         raise SystemExit(f"No LMX files found with pattern: {pattern}")
@@ -474,8 +476,171 @@ def main() -> None:
     for file_path, count in zip(files, estimates_per_file):
         print(f"  {os.path.basename(file_path)}: {count}")
 
-    medians_array = np.array(per_run_medians)
-    plot_distribution(medians_array, args, args.out, args.show_points)
+    return np.array(per_run_medians)
+
+
+def plot_two_panel_distribution(
+    z_cf: np.ndarray,
+    z_berp: np.ndarray,
+    args: argparse.Namespace,
+    out_path: str,
+    show_points: bool,
+) -> None:
+    combined = np.concatenate([z_cf, z_berp])
+    if combined.size > 1:
+        bins = np.histogram_bin_edges(combined, bins="auto")
+    else:
+        center = float(combined[0]) if combined.size == 1 else 0.0
+        bins = np.array([center - 0.5, center + 0.5])
+
+    x_min = float(combined.min())
+    x_max = float(combined.max())
+    span = x_max - x_min
+    pad = 0.05 * span if span > 0 else 0.5
+    x_limits = (x_min - pad, x_max + pad)
+
+    hist_cf, _ = np.histogram(z_cf, bins=bins, density=True)
+    hist_berp, _ = np.histogram(z_berp, bins=bins, density=True)
+    y_max = float(max(hist_cf.max(), hist_berp.max()))
+
+    if gaussian_kde is not None:
+        for sample in (z_cf, z_berp):
+            if sample.size > 1:
+                kde = gaussian_kde(sample)
+                x_grid = np.linspace(x_limits[0], x_limits[1], 256)
+                y_max = max(y_max, float(np.max(kde(x_grid))))
+
+    y_limits = (0.0, y_max * 1.1 if y_max > 0 else 1.0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True, dpi=150)
+
+    hist_color = OKABE_ITO["sky"]
+    line_color = OKABE_ITO["blue"]
+    stats_color = OKABE_ITO["vermillion"]
+
+    panels = [
+        ("Cf-only", z_cf, axes[0]),
+        ("BeRP-only", z_berp, axes[1]),
+    ]
+
+    rng = np.random.default_rng(args.seed)
+
+    for title, data, ax in panels:
+        ax.hist(
+            data,
+            bins=bins,
+            density=True,
+            color=hist_color,
+            edgecolor=OKABE_ITO["gray"],
+            alpha=0.8,
+            linewidth=0.8,
+        )
+
+        if gaussian_kde is not None and data.size > 1:
+            kde = gaussian_kde(data)
+            x_grid = np.linspace(x_limits[0], x_limits[1], 256)
+            ax.plot(x_grid, kde(x_grid), color=line_color, linewidth=2)
+
+        mean_val = float(np.mean(data))
+        median_val = float(np.median(data))
+
+        ax.axvline(mean_val, color=stats_color, linestyle="--", linewidth=1.5)
+        ax.axvline(median_val, color=stats_color, linestyle=":", linewidth=1.5)
+
+        ax.text(
+            0.02,
+            0.98,
+            (
+                f"N runs = {data.size}\n"
+                f"Tg = {args.tg:g}s\n"
+                f"Window = {args.window:g}s\n"
+                f"Step = {args.step:g}s"
+            ),
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox=dict(
+                boxstyle="round",
+                facecolor="white",
+                edgecolor=OKABE_ITO["gray"],
+                alpha=0.9,
+            ),
+        )
+
+        handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                color=stats_color,
+                linestyle="--",
+                linewidth=1.5,
+                label=f"Mean = {mean_val:.2f}",
+            ),
+            plt.Line2D(
+                [0],
+                [0],
+                color=stats_color,
+                linestyle=":",
+                linewidth=1.5,
+                label=f"Median = {median_val:.2f}",
+            ),
+        ]
+        ax.legend(handles=handles, frameon=False, loc="upper right")
+
+        if show_points:
+            jitter = rng.normal(scale=0.02, size=data.size)
+            ax.scatter(
+                data + jitter,
+                np.zeros_like(data),
+                color=OKABE_ITO["orange"],
+                alpha=0.7,
+                s=25,
+                zorder=3,
+            )
+
+        ax.set_title(title)
+        ax.set_xlim(x_limits)
+        ax.set_ylim(y_limits)
+
+    fig.suptitle("Distribution of real-time correlation estimates across runs")
+    fig.supxlabel("Correlation Z-score (median across windows)")
+    axes[0].set_ylabel("Density")
+
+    fig.tight_layout(rect=[0, 0.03, 1, 0.93])
+
+    out_base, out_ext = os.path.splitext(out_path)
+    if out_ext.lower() == ".pdf":
+        png_path = out_base + ".png"
+        pdf_path = out_path
+    else:
+        png_path = out_path
+        pdf_path = out_base + ".pdf"
+
+    fig.savefig(png_path, dpi=300)
+    fig.savefig(pdf_path)
+    plt.close(fig)
+
+
+def main() -> None:
+    args = parse_args()
+    print(format_params(args))
+
+    print("Processing Cf-only runs")
+    z_cf = compute_run_medians(args.cf_dir, args)
+    print("Processing BeRP-only runs")
+    z_berp = compute_run_medians(args.berp_dir, args)
+
+    if z_cf.size == 0 or z_berp.size == 0:
+        raise SystemExit("Both Cf-only and BeRP-only runs must have valid medians")
+
+    try:
+        assert np.median(z_cf) > 0
+        assert np.median(z_berp) > np.median(z_cf)
+    except AssertionError:
+        print("Warning: configuration separation failed (median ordering check).")
+
+    plot_two_panel_distribution(z_cf, z_berp, args, args.out, args.show_points)
 
 
 if __name__ == "__main__":
