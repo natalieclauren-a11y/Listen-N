@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import os
 from dataclasses import dataclass
@@ -40,6 +41,14 @@ class ControllerResult:
     n_events: np.ndarray
 
 
+@dataclass(frozen=True)
+class ScheduleRow:
+    t_start_s: float
+    t_end_s: float
+    state: str
+    w_s: float
+
+
 def parse_args() -> argparse.Namespace:
     description = (
         "Generate adaptive window transition figure from sequential LMX files."
@@ -50,7 +59,10 @@ def parse_args() -> argparse.Namespace:
         '"C:\\...\\CfBeRP_motion" --out ".\\figures\\adaptive_cfberp"\n'
         "  python .\\make_adaptive_window_transition.py --lmx-files "
         '"C:\\...\\seg1.lmx" "C:\\...\\seg2.lmx" "C:\\...\\seg3.lmx" '
-        "--out ".\\figures\\adaptive_pu" --gap-s 0"
+        '--out ".\\figures\\adaptive_pu" --gap-s 0\n'
+        "  python .\\make_adaptive_window_transition.py --lmx-dir "
+        '"C:\\...\\CfBeRP_motion" --out ".\\figures\\adaptive_forced" '
+        '--schedule-csv ".\\schedule.csv"'
     )
     parser = argparse.ArgumentParser(
         description=description,
@@ -147,6 +159,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Show Page-Hinkley alarm markers",
+    )
+    parser.add_argument(
+        "--schedule-csv",
+        default=None,
+        help="Optional CSV schedule for forced window and state changes",
     )
     return parser.parse_args()
 
@@ -250,6 +267,68 @@ def stitch_sessions(
     return np.concatenate(stitched)
 
 
+def _load_schedule_csv(
+    path: str,
+    w_min_s: float,
+    w_max_s: float,
+) -> List[ScheduleRow]:
+    required_fields = ["t_start_s", "t_end_s", "state", "w_s"]
+    allowed_states = {"Warmup", "Track", "Hold", "Degraded", "LowRate"}
+    rows: List[ScheduleRow] = []
+
+    with open(path, "r", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(
+                "Schedule CSV must include header: t_start_s,t_end_s,state,w_s"
+            )
+        missing = [field for field in required_fields if field not in reader.fieldnames]
+        if missing:
+            raise ValueError(
+                "Schedule CSV must include header: t_start_s,t_end_s,state,w_s"
+            )
+        prev_end: Optional[float] = None
+        for row_num, row in enumerate(reader, start=2):
+            try:
+                t_start = float(row["t_start_s"])
+                t_end = float(row["t_end_s"])
+                state = str(row["state"]).strip()
+                w_s = float(row["w_s"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid value in schedule CSV row {row_num}: {exc}"
+                ) from exc
+
+            if t_start >= t_end:
+                raise ValueError(
+                    f"Schedule row {row_num} has t_start_s >= t_end_s"
+                )
+            if state not in allowed_states:
+                raise ValueError(
+                    f"Schedule row {row_num} has invalid state: {state}"
+                )
+            if not (w_min_s <= w_s <= w_max_s):
+                raise ValueError(
+                    f"Schedule row {row_num} has w_s outside [{w_min_s}, {w_max_s}]"
+                )
+            if prev_end is not None and t_start < prev_end:
+                raise ValueError("Schedule rows must be sorted and non-overlapping")
+            prev_end = t_end
+            rows.append(
+                ScheduleRow(
+                    t_start_s=t_start,
+                    t_end_s=t_end,
+                    state=state,
+                    w_s=w_s,
+                )
+            )
+
+    if not rows:
+        raise ValueError("Schedule CSV must include at least one row")
+
+    return rows
+
+
 def page_hinkley_update(
     x: float,
     mean: float,
@@ -283,6 +362,7 @@ def run_controller(
     target_rel_unc: float,
     min_events: int,
     tg_ms: float,
+    schedule: Optional[List[ScheduleRow]] = None,
 ) -> ControllerResult:
     if timestamps.size == 0:
         return ControllerResult(
@@ -324,7 +404,26 @@ def run_controller(
     rate_smooth_prev = 0.0
     n_target = (1.0 / target_rel_unc) ** 2
 
+    schedule_starts: Optional[List[float]] = None
+    if schedule is not None:
+        schedule_starts = [row.t_start_s for row in schedule]
+
     for idx, t_end in enumerate(step_times):
+        if schedule is not None:
+            if t_end < schedule[0].t_start_s:
+                row = schedule[0]
+            elif t_end >= schedule[-1].t_end_s:
+                row = schedule[-1]
+            else:
+                assert schedule_starts is not None
+                row_idx = bisect.bisect_right(schedule_starts, t_end) - 1
+                row = schedule[row_idx]
+                if t_end >= row.t_end_s:
+                    raise ValueError(
+                        f"Schedule does not cover t_end_s={t_end:.6f}"
+                    )
+            current_state = row.state
+            current_w = row.w_s
         t_start = max(0.0, t_end - current_w)
         left = np.searchsorted(timestamps, t_start, side="left")
         right = np.searchsorted(timestamps, t_end, side="left")
@@ -342,64 +441,70 @@ def run_controller(
 
         w_des = n_target / max(rate_smooth, 1e-9)
         w_des = float(np.clip(w_des, w_min_s, w_max_s))
+        if schedule is not None:
+            w_des = current_w
         w_des_s[idx] = w_des
 
-        log_rate = np.log(rate + 1e-6)
-        mean, cumulative, min_cumulative, stat, alarm, n_ph = page_hinkley_update(
-            log_rate, mean, n_ph, cumulative, min_cumulative, ph_delta, ph_threshold
-        )
-        change_stat[idx] = stat
-        ph_alarm[idx] = alarm
+        if schedule is None:
+            log_rate = np.log(rate + 1e-6)
+            mean, cumulative, min_cumulative, stat, alarm, n_ph = page_hinkley_update(
+                log_rate, mean, n_ph, cumulative, min_cumulative, ph_delta, ph_threshold
+            )
+            change_stat[idx] = stat
+            ph_alarm[idx] = alarm
 
-        if alarm:
-            if alarm_start is None:
-                alarm_start = t_end
-            alarm_clear_start = None
-        else:
-            alarm_start = None
-            if alarm_clear_start is None:
-                alarm_clear_start = t_end
-
-        alarm_sustained = alarm and alarm_start is not None and (
-            t_end - alarm_start >= debounce_s
-        )
-        alarm_cleared = (not alarm) and alarm_clear_start is not None and (
-            t_end - alarm_clear_start >= debounce_s
-        )
-        lowrate_condition = count < min_events or rate < (min_events / w_max_s)
-
-        if t_end < warmup_s:
-            current_state = "Warmup"
-        else:
-            if alarm_sustained:
-                if count >= min_events:
-                    current_state = "Hold"
-                else:
-                    current_state = "Degraded"
+            if alarm:
+                if alarm_start is None:
+                    alarm_start = t_end
+                alarm_clear_start = None
             else:
-                if current_state in {"Hold", "Degraded"}:
-                    if alarm_cleared:
-                        current_state = "Track"
-                elif current_state == "LowRate":
-                    if count >= min_events and alarm_cleared:
-                        current_state = "Track"
-                else:
-                    if lowrate_condition:
-                        current_state = "LowRate"
-                    else:
-                        current_state = "Track"
+                alarm_start = None
+                if alarm_clear_start is None:
+                    alarm_clear_start = t_end
 
-        # Desired window controller with asymmetric rate limits.
-        if current_state == "Track":
-            dw = w_des - current_w
-            dw = float(np.clip(dw, -w_contract_max_per_step, w_expand_max_per_step))
-            current_w = float(np.clip(current_w + dw, w_min_s, w_max_s))
-        elif current_state in {"Degraded", "LowRate"}:
-            current_w = min(w_max_s, current_w + w_expand_max_per_step)
-        elif current_state == "Hold":
-            current_w = current_w
-        elif current_state == "Warmup":
-            current_w = current_w
+            alarm_sustained = alarm and alarm_start is not None and (
+                t_end - alarm_start >= debounce_s
+            )
+            alarm_cleared = (not alarm) and alarm_clear_start is not None and (
+                t_end - alarm_clear_start >= debounce_s
+            )
+            lowrate_condition = count < min_events or rate < (min_events / w_max_s)
+
+            if t_end < warmup_s:
+                current_state = "Warmup"
+            else:
+                if alarm_sustained:
+                    if count >= min_events:
+                        current_state = "Hold"
+                    else:
+                        current_state = "Degraded"
+                else:
+                    if current_state in {"Hold", "Degraded"}:
+                        if alarm_cleared:
+                            current_state = "Track"
+                    elif current_state == "LowRate":
+                        if count >= min_events and alarm_cleared:
+                            current_state = "Track"
+                    else:
+                        if lowrate_condition:
+                            current_state = "LowRate"
+                        else:
+                            current_state = "Track"
+
+            # Desired window controller with asymmetric rate limits.
+            if current_state == "Track":
+                dw = w_des - current_w
+                dw = float(np.clip(dw, -w_contract_max_per_step, w_expand_max_per_step))
+                current_w = float(np.clip(current_w + dw, w_min_s, w_max_s))
+            elif current_state in {"Degraded", "LowRate"}:
+                current_w = min(w_max_s, current_w + w_expand_max_per_step)
+            elif current_state == "Hold":
+                current_w = current_w
+            elif current_state == "Warmup":
+                current_w = current_w
+        else:
+            change_stat[idx] = 0.0
+            ph_alarm[idx] = False
 
         w_s[idx] = current_w
         states.append(current_state)
@@ -584,6 +689,13 @@ def main() -> None:
 
     sessions = [read_lmx_timestamps(path) for path in lmx_files]
     timestamps = stitch_sessions(sessions, args.gap_s)
+    schedule_rows = None
+    if args.schedule_csv:
+        schedule_rows = _load_schedule_csv(
+            args.schedule_csv,
+            w_min_s=args.w_min_s,
+            w_max_s=args.w_max_s,
+        )
 
     result = run_controller(
         timestamps=timestamps,
@@ -600,6 +712,7 @@ def main() -> None:
         target_rel_unc=args.target_rel_unc,
         min_events=args.min_events,
         tg_ms=args.tg_ms,
+        schedule=schedule_rows,
     )
 
     out_png, out_pdf, out_csv = _resolve_outputs(args.out)
