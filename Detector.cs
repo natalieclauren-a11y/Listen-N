@@ -24,6 +24,8 @@ using MultiPass;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using Listen_N;
+using Listen_N.DetectorCore.Abstractions;
+using Listen_N.DetectorCore.Protocol;
 
 //
 // How to mount the usb card on the MC-15
@@ -318,6 +320,27 @@ namespace Vf61Gui
 
         public Thread threadTcpIpDataReceived;
         public AdaptiveWindowEngine? Adaptive { get; set; }
+
+        private readonly IDetectorTransport detectorTransport;
+        private readonly ILmxSink? lmxSink;
+        private readonly IDetectorNotifier detectorNotifier;
+        private readonly IDetectionSink detectionSink;
+        private readonly IDetectorClock detectorClock;
+
+        private sealed class AdaptiveDetectionSink : IDetectionSink
+        {
+            private readonly Func<AdaptiveWindowEngine?> adaptiveProvider;
+
+            public AdaptiveDetectionSink(Func<AdaptiveWindowEngine?> adaptiveProvider)
+            {
+                this.adaptiveProvider = adaptiveProvider;
+            }
+
+            public void OnDetection(DetectionEvent detectionEvent)
+            {
+                adaptiveProvider()?.OnDetection(new Listen_N.Detection(detectionEvent.TimestampUs, detectionEvent.ChannelId));
+            }
+        }
 
         public sealed class Detection
         {
@@ -668,8 +691,23 @@ namespace Vf61Gui
         #endregion
 
 #pragma warning disable CS8618
-        public Detector()
+        public Detector() : this(null, null, null, null, null)
         {
+        }
+
+        public Detector(
+            IDetectorTransport? detectorTransport,
+            ILmxSink? lmxSink,
+            IDetectorNotifier? detectorNotifier,
+            IDetectionSink? detectionSink,
+            IDetectorClock? detectorClock)
+        {
+            this.detectorTransport = detectorTransport ?? NullDetectorTransport.Instance;
+            this.lmxSink = lmxSink;
+            this.detectorNotifier = detectorNotifier ?? new WinFormsDetectorNotifier();
+            this.detectionSink = detectionSink ?? new AdaptiveDetectionSink(() => Adaptive);
+            this.detectorClock = detectorClock ?? new SystemDetectorClock();
+
             InitializeComponent();
 
             hashCode = GetHashCode();
@@ -1379,27 +1417,19 @@ namespace Vf61Gui
             bytesTransferred += (uint)bytesRead;
 
             // --- NEW: decode each 8-byte record and forward to adaptive engine ---
-            for (int offset = 0; offset < bytesRead; offset += 8)
+            for (int offset = 0; offset + sizeof(ulong) <= bytesRead; offset += sizeof(ulong))
             {
-                ulong word = BitConverter.ToUInt64(bufferRead, offset);
-
-                // Decode channel ID (lowest 5 bits)
-                byte channelId = (byte)(word & 0x1F);
-
-                // Decode timestamp (upper 59 bits, 10 ns ticks)
-                long ticks10ns = (long)(word >> 5);
-
-                // Convert to microseconds
-                long timestampUs = ticks10ns / 100;  // 100 × 10 ns = 1 µs
+                DetectionEvent detectionEvent = DetectorProtocolParser.DecodeEventWord(
+                    bufferRead.AsSpan(offset, sizeof(ulong)));
 
                 // Debug: print first few events
                 if (offset < 80) // first 10 events
                 {
-                    System.Diagnostics.Debug.WriteLine($"DEBUG hit: ch={channelId}, tsUs={timestampUs}");
+                    System.Diagnostics.Debug.WriteLine($"DEBUG hit: ch={detectionEvent.ChannelId}, tsUs={detectionEvent.TimestampUs}");
 
                 }
 
-                Adaptive?.OnDetection(new Listen_N.Detection(timestampUs, channelId));
+                detectionSink.OnDetection(detectionEvent);
             }
         }
 
