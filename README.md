@@ -1,5 +1,10 @@
 # Listen-N
 
+> **C++ migration:** A runnable cross-platform C++20 core, replay CLI, C ABI, and
+> native tests now live in [`cpp/`](cpp/README.md). The existing C# application is
+> retained during parity-driven migration; the architecture findings and staged
+> replacement plan are documented in [`docs/CppReimplementation.md`](docs/CppReimplementation.md).
+
 Listen-N is a Windows Forms application for coordinating LISTEN-N neutron detectors, orchestrating data collection, adaptive analysis, and real-time visualization. The app targets .NET 8.0 (Windows) and uses OxyPlot/ScottPlot for plotting and System.IO.Ports for serial communication.
 
 ## Project structure
